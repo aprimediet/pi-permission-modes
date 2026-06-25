@@ -343,11 +343,22 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   // Alt+T: cycle the thinking level. pi has no built-in cycle helper, and setThinkingLevel
   // clamps to the model's capabilities, so we advance to the next level the model actually
   // accepts (skipping ones it clamps away). The footer reflects the new level live.
-  const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+  const THINKING_LEVELS = [
+    "off",
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ] as const;
   function cycleThinkingLevel(ctx: ExtensionContext): void {
     const get = (): string =>
-      typeof (pi as any).getThinkingLevel === "function" ? (pi as any).getThinkingLevel() : "off";
-    const setLevel = (pi as any).setThinkingLevel as ((l: string) => void) | undefined;
+      typeof (pi as any).getThinkingLevel === "function"
+        ? (pi as any).getThinkingLevel()
+        : "off";
+    const setLevel = (pi as any).setThinkingLevel as
+      | ((l: string) => void)
+      | undefined;
     if (typeof setLevel !== "function") return;
     const cur = get();
     let i = THINKING_LEVELS.indexOf(cur as (typeof THINKING_LEVELS)[number]);
@@ -361,11 +372,16 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
         return;
       }
     }
-    if (ctx.hasUI) ctx.ui.notify(`Thinking: ${get()} (model supports no other levels)`, "info");
+    if (ctx.hasUI)
+      ctx.ui.notify(
+        `Thinking: ${get()} (model supports no other levels)`,
+        "info",
+      );
   }
 
   pi.registerShortcut("alt+t", {
-    description: "Cycle thinking level (off → minimal → low → medium → high → xhigh)",
+    description:
+      "Cycle thinking level (off → minimal → low → medium → high → xhigh)",
     handler: async (ctx) => cycleThinkingLevel(ctx),
   });
 
@@ -511,20 +527,20 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       persistState();
     }
 
-    if (currentMode === "auto" && !isStepping) {
-      if (autoFollowUpDepth > 0 && autoFollowUpCount >= autoFollowUpDepth)
-        return;
-      if (hasToolCalls(msg) && !isCompletionSignal(text)) {
-        isStepping = true;
-        autoFollowUpCount++;
-        pi.sendUserMessage(
-          "Continue. Auto mode is active — proceed without asking.",
-          {
-            deliverAs: "followUp",
-          },
-        );
-      }
-    }
+    // if (currentMode === "auto" && !isStepping) {
+    //   if (autoFollowUpDepth > 0 && autoFollowUpCount >= autoFollowUpDepth)
+    //     return;
+    //   if (hasToolCalls(msg) && !isCompletionSignal(text)) {
+    //     isStepping = true;
+    //     autoFollowUpCount++;
+    //     pi.sendUserMessage(
+    //       "Continue. Auto mode is active — proceed without asking.",
+    //       {
+    //         deliverAs: "followUp",
+    //       },
+    //     );
+    //   }
+    // }
   });
 
   // ---- agent_end: idle reset + plan complete + plan offer ----------------
