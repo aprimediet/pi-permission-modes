@@ -94,7 +94,7 @@ Auto-discovery also works: drop this folder at `~/.pi/agent/extensions/permissio
 ## Testing
 
 ```bash
-npm test                # run all 64 tests (vitest)
+npm test                # run all 112 tests (vitest)
 npm run test:watch      # watch mode for development
 ```
 
