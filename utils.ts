@@ -3,11 +3,15 @@
  *
  * - Bash read-only classifier used by Plan mode and the default/accept-edits
  *   gates (SAFE allowlist AND not DESTRUCTIVE).
+ * - Outside-cwd / project-root detection for the auto-mode relaxation.
  * - Numbered "Plan:" extraction and [DONE:n] step tracking used by Plan mode's
  *   execute/track flow.
  *
  * Ported from pi's bundled `examples/extensions/plan-mode/utils.ts`.
  */
+
+import { existsSync } from "node:fs"
+import path from "node:path"
 
 // Commands that mutate state — never allowed in plan mode, and prompt elsewhere.
 const DESTRUCTIVE_PATTERNS: RegExp[] = [
@@ -195,4 +199,90 @@ export function formatCount(n: number): string {
 	if (n < 1000) return String(Math.round(n));
 	const k = n / 1000;
 	return `${k >= 10 ? Math.round(k) : k.toFixed(1)}k`;
+}
+
+/**
+ * Returns true iff `targetPath` resolves to a location outside `cwd`.
+ *
+ * Empty string is treated as "inside cwd" (no path = nothing to be outside of).
+ * Absolute paths are compared against cwd; relative paths are resolved from cwd.
+ * Does NOT resolve symlinks — same limitation as `path.resolve`.
+ */
+export function isOutsideCwd(targetPath: string, cwd: string): boolean {
+	if (!targetPath) return false;
+	const resolved = path.isAbsolute(targetPath)
+		? path.resolve(targetPath)
+		: path.resolve(cwd, targetPath);
+	const cwdAbs = path.resolve(cwd);
+	// Same dir or strictly inside cwd → not outside
+	if (resolved === cwdAbs) return false;
+	return !resolved.startsWith(cwdAbs + path.sep);
+}
+
+/**
+ * Heuristic: does a bash command reference paths outside `cwd`?
+ *
+ * Flags:
+ *   - absolute paths anywhere in the command
+ *   - `..` traversal (cd .., ls ../foo)
+ *   - `~` or `$HOME` / `$TMPDIR` expansions
+ *
+ * Conservative: false negatives are acceptable (we still prompt for destructive
+ * commands separately), false positives are NOT — we don't want to over-prompt.
+ */
+export function commandTargetsOutsideCwd(command: string, cwd: string): boolean {
+	if (!command || !command.trim()) return false;
+
+	// Absolute path anywhere in the command.
+	// `/` must be at the start of a token (after whitespace, ;&|() or string start),
+	// and the next char must be a real path char (not `.` to avoid `./` and `../` false positives).
+	if (/(^|[\s;&|('])(\/[A-Za-z0-9_\-])/.test(command)) return true;
+
+	// Tilde expansion: `~` at start of token (not in the middle of a path)
+	if (/(^|[\s;&|()])(~|\$HOME|\$TMPDIR|\$TMP|\$PWD\b)/.test(command)) return true;
+
+	// `..` as a path component (not as part of `...` or `./..`)
+	if (/(^|[\s;&|(])\.\.($|[\s/&|)])/.test(command)) return true;
+
+	return false;
+}
+
+/**
+ * Walk up from `cwd` looking for a project root marker (.git or package.json).
+ * Returns the project root path, or `null` if none found within 20 levels.
+ */
+export function findProjectRoot(cwd: string): string | null {
+	let dir = path.resolve(cwd);
+	for (let i = 0; i < 20; i++) {
+		// Stop at filesystem root
+		if (dir === path.dirname(dir)) return null;
+		// Detect: .git, package.json
+		if (
+			existsSync(path.join(dir, ".git")) ||
+			existsSync(path.join(dir, "package.json"))
+		) {
+			return dir;
+		}
+		dir = path.dirname(dir);
+	}
+	return null;
+}
+
+/**
+ * Check if `targetPath` is inside the project root (if one can be detected
+ * or is provided). Returns false if no project root is found — caller should
+ * fall back to `isOutsideCwd` in that case.
+ */
+export function isInsideProject(
+	targetPath: string,
+	cwd: string,
+	projectRoot?: string | null,
+): boolean {
+	const root = projectRoot ?? findProjectRoot(cwd);
+	if (!root) return false;
+	const resolved = path.isAbsolute(targetPath)
+		? path.resolve(targetPath)
+		: path.resolve(cwd, targetPath);
+	const rootAbs = path.resolve(root);
+	return resolved.startsWith(rootAbs + path.sep) || resolved === rootAbs;
 }

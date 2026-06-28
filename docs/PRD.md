@@ -1,11 +1,11 @@
 # Product Requirements Document: permission-modes
 
-**Version:** 1.0
-**Date:** 2026-06-25
-**Status:** Draft
+**Version:** 2.0
+**Date:** 2026-06-28
+**Status:** Implemented
 
 ## Overview
-A Claude-Code-style permission-mode system for the pi coding agent. Four modes — default, plan, accept-edits, and auto — cycled with Shift+Tab — that control how tool calls and file edits get approved without changing the underlying model.
+A Claude-Code-style permission-mode system for the pi coding agent. Three modes — ask, plan, and auto — cycled with Shift+Tab — that control how tool calls and file edits get approved without changing the underlying model. Outside-cwd read guarding protects against data exfiltration in ask mode; auto mode provides an outside-cwd safety net for destructive operations.
 
 ## Problem Statement
 The pi coding agent lacks granular permission controls during a session. Users who want different levels of autonomy — from full manual approval for every edit to completely hands-off execution — have no way to switch. This friction makes pi less productive than tools like Claude Code that offer mode-based workflows.
@@ -31,7 +31,7 @@ The pi coding agent lacks granular permission controls during a session. Users w
 ## Key Features
 
 ### Permission Mode Switching
-Cycle through four modes with Shift+Tab: Default (prompt on edits) → Plan (read-only) → Accept-edits (auto-approve edits) → Auto (full autonomy). Also available as slash commands (`/default`, `/plan`, `/accept-edits`, `/auto`, `/mode`).
+Cycle through three modes with Shift+Tab: Ask (prompt on edits + reads outside cwd) → Plan (read-only) → Auto (full autonomy with outside-cwd safety net). Also available as slash commands (`/ask`, `/plan`, `/auto`, `/mode`; `/default` works as alias for `/ask`).
 
 ### Plan Mode with Todo Tracking
 In Plan mode, edits and writes are disabled and bash is restricted to read-only commands. After exploration, the agent emits a numbered `Plan:` list. The user can execute the plan (switches to auto mode with step tracking via `[DONE:n]` tags), stay in plan mode, or refine the plan.

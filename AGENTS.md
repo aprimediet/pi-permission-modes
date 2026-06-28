@@ -4,7 +4,7 @@ Guide for coding agents working in this repository. Product context (goals, user
 features, success metrics): see [docs/PRD.md](docs/PRD.md).
 
 ## Summary
-A pi extension that implements Claude-Code-style permission modes (default / plan / accept-edits / auto) for the pi coding agent. It intercepts tool calls, gates approvals per mode, injects mode-specific context, and provides a custom footer + status pill.
+A pi extension that implements Claude-Code-style permission modes (ask / plan / auto) for the pi coding agent, replacing v1.x's 4-mode system (default/plan/accept-edits/auto). It intercepts tool calls, gates approvals per mode, injects mode-specific context, provides a custom footer + status pill, and guards reads outside cwd in ask mode.
 
 ## Tech Stack
 - **Language:** TypeScript (ESM — `"type": "module"`)
@@ -33,7 +33,7 @@ This is a pi extension — it has no standalone build/run lifecycle. All command
 
 | Action | Command |
 |---|---|
-| Switch mode | `/default`, `/plan`, `/accept-edits`, `/auto`, or `/mode` |
+| Switch mode | `/ask`, `/plan`, `/auto`, or `/mode` (`/default` works as alias) |
 | Set auto depth | `/auto-depth <n>` (0 = unlimited; default 20) |
 | Shortcut | `Shift+Tab` to cycle modes |
 | Shortcut | `Alt+T` to cycle thinking level |
@@ -58,7 +58,7 @@ There is no test, lint, or build command currently. The extension is loaded and 
 - **Do NOT** modify the model or switch models — this extension only changes approval behavior
 - **Do NOT** duplicate content between AGENTS.md and CLAUDE.md — keep AGENTS.md as the single source of truth
 - **Safe to delete:** `.pi/permission-modes-45ea0551.md` (recreated automatically)
-- **Invariants:** The four-mode cycle (default → plan → accept-edits → auto) is hard-coded in `MODE_CYCLE`; the plan-mode tool restrictions (`PLAN_TOOLS`, `PLAN_DISABLED`) and bash safe/destructive patterns are in `utils.ts`. Change these with care.
+- **Invariants:** The three-mode cycle (ask → plan → auto) is hard-coded in `MODE_CYCLE`; accept-edits was removed and default was renamed to ask in v2.0.0. The plan-mode tool restrictions (`PLAN_TOOLS`, `PLAN_DISABLED`) and bash safe/destructive patterns are in `utils.ts`. Change these with care.
 
 ## Known Issues & Gotchas
 - No test infrastructure yet — no test files, no vitest/jest config. Add tests before making non-trivial logic changes.
@@ -73,5 +73,5 @@ There is no test, lint, or build command currently. The extension is loaded and 
 - **memory (@aprimediet/memory):** Active (1 entry). Durable facts are stored at `~/.pi/projects/permission-modes-45ea0551/memory/`. Use `memory_write` to save decisions/gotchas and `memory_search` to recall context.
 
 ## Current Focus
-- **Initial release v1.0.0** — core modes (default/plan/accept-edits/auto), Plan: extraction + step tracking, UI footer + status pill, Shift+Tab/Alt+T keybindings, mode persistence
-- Next: add test coverage; re-enable auto-mode follow-up when pi support is stable
+- **v2.0.0** — 3-mode redesign (ask/plan/auto), outside-cwd read guarding in ask mode, outside-cwd safety net in auto mode, project-root detection, vitest test suite, auto follow-up re-enabled, full 64-test coverage
+- Next: solicit user feedback; publish to npm

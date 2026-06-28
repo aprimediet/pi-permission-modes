@@ -1,17 +1,16 @@
 # @aprimediet/permission-modes
 
-Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Four modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. The model is **not** changed per mode — only the approval behavior.
+Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Three modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. The model is **not** changed per mode — only the approval behavior.
 
 ## Modes
 
-| Mode | edit / write | bash | agent control |
-|---|---|---|---|
-| **default** `●` | prompt on each edit/write (`Allow` / `Allow all → auto` / `Block`) | mutating commands prompt; read-only pass | — |
-| **plan** `⏸` | disabled (stripped from the active tool set) | read-only allowlist only; mutating commands blocked | produce a numbered `Plan:`, then **Execute / Stay / Refine** |
-| **accept-edits** `✎` | auto-approved | mutating commands still prompt; read-only pass | — |
-| **auto** `▶` | auto-approved | auto-approved | auto-continues until done, bounded by `/auto-depth` |
+| Mode | edit / write | reads outside cwd | bash | agent control |
+|---|---|---|---|---|
+| **ask** `●` | prompt on each edit/write (`Allow` / `Allow all → auto` / `Block`) | **prompt** | mutating commands prompt; read-only pass | — |
+| **plan** `⏸` | disabled (stripped from the active tool set) | allowed (exploration needed for planning) | read-only allowlist only; mutating commands blocked | produce a numbered `Plan:`, then **Execute / Stay / Refine** |
+| **auto** `▶` | auto-approved (prompts if **outside** project root) | auto-approved | auto-approved; prompts if destructive **outside** project root | auto-continues until done, bounded by `/auto-depth` |
 
-**Cycle (Shift+Tab):** default → plan → accept-edits → auto → default.
+**Cycle (Shift+Tab):** ask → plan → auto → ask.
 
 When there is no interactive UI (`pi -p`, `--mode json`), anything that would prompt is **blocked** instead of silently allowed.
 
@@ -19,11 +18,11 @@ When there is no interactive UI (`pi -p`, `--mode json`), anything that would pr
 
 | Kind | Name | Behavior |
 |---|---|---|
-| Command | `/default`, `/plan`, `/accept-edits`, `/auto` | switch to that mode |
+| Command | `/ask`, `/plan`, `/auto` | switch to that mode (`/default` also works as alias) |
 | Command | `/mode [name]` | set the given mode, or pick from a list |
 | Command | `/auto-depth <n>` | cap auto-mode follow-ups (`0` = unlimited; default 20) |
 | Shortcut | `Shift+Tab` | cycle modes |
-| Flag | `--permission-mode <name>` | start in a mode (default `default`) |
+| Flag | `--permission-mode <name>` | start in a mode (accepts `ask`, `plan`, `auto`, or `default` as alias; default `ask`) |
 
 > The start-mode flag is `--permission-mode` (not `--mode`) because pi already has a built-in `--mode` for output format (text/json/rpc).
 

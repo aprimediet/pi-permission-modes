@@ -3,12 +3,13 @@
  *
  * A Claude-Code-style permission-mode system for the pi coding agent.
  *
- * Four modes, cycled with Shift+Tab (default → plan → accept-edits → auto → default):
- *   - default      Ask before each file edit/write; mutating bash prompts.
+ * Three modes, cycled with Shift+Tab (ask → plan → auto → ask):
+ *   - ask          File edits/writes require approval; reads outside cwd require
+ *                  approval; inside-cwd reads are auto-approved; mutating bash prompts.
  *   - plan         Read-only; edit/write disabled, bash restricted to an allowlist;
  *                  produce a numbered Plan:, then Execute / Stay / Refine.
- *   - accept-edits Auto-approve edit/write; mutating bash still prompts.
- *   - auto         Auto-approve everything and auto-continue (bounded by /auto-depth).
+ *   - auto         Auto-approve everything and auto-continue (bounded by /auto-depth)
+ *                  with an outside-cwd safety net (prompt on ops outside project root).
  *
  * The model is NOT changed per mode (Claude Code keeps one model across modes); the
  * footer only displays the current model as `variant / thinking`
@@ -22,22 +23,26 @@ import type {
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import {
+  commandTargetsOutsideCwd,
   extractTodoItems,
+  findProjectRoot,
   formatCount,
   isCompletionSignal,
+  isInsideProject,
+  isOutsideCwd,
   isSafeCommand,
   markCompletedSteps,
   type TodoItem,
 } from "./utils.ts";
 
-type Mode = "default" | "plan" | "accept-edits" | "auto";
+type Mode = "ask" | "plan" | "auto";
 
-const MODE_CYCLE: Mode[] = ["default", "plan", "accept-edits", "auto"];
+// accept-edits removed, default renamed to ask in v2.0.0.
+const MODE_CYCLE: Mode[] = ["ask", "plan", "auto"];
 
 const MODE_META: Record<Mode, { icon: string; label: string; role: string }> = {
-  default: { icon: "●", label: "Default", role: "muted" },
+  ask: { icon: "●", label: "Ask", role: "muted" },
   plan: { icon: "⏸", label: "Plan", role: "warning" },
-  "accept-edits": { icon: "✎", label: "Accept", role: "success" },
   auto: { icon: "▶", label: "Auto", role: "accent" },
 };
 
@@ -46,10 +51,8 @@ const PLAN_TOOLS = ["read", "bash", "grep", "find", "ls"];
 const PLAN_DISABLED = new Set(["edit", "write"]);
 
 const MODE_CONTEXT: Record<Mode, string> = {
-  default:
-    "[DEFAULT MODE] Standard mode. File edits/writes and destructive shell commands require explicit user approval before they run.",
-  "accept-edits":
-    "[ACCEPT-EDITS MODE ACTIVE] File edit/write tool calls are auto-approved. Other potentially destructive operations (e.g. mutating shell commands) still require confirmation. Proceed efficiently and only pause for genuinely risky actions.",
+  ask:
+    "[ASK MODE] Default permission mode. File edits/writes and access outside the working directory require explicit approval before they run. Mutating shell commands require approval. Read-only access inside the working directory is auto-approved.",
   plan: `[PLAN MODE ACTIVE]
 You are in a read-only exploration mode. The edit and write tools are disabled and bash is restricted to read-only commands.
 
@@ -68,13 +71,14 @@ type Block = { block: true; reason: string } | undefined;
 
 export default function permissionModesExtension(pi: ExtensionAPI): void {
   // ---- state -------------------------------------------------------------
-  let currentMode: Mode = "default";
+  let currentMode: Mode = "ask";
   let autoFollowUpDepth = 20;
   let autoFollowUpCount = 0;
   let isStepping = false;
   let toolsBeforePlanMode: string[] | undefined;
   let planExecuting = false;
   let planTodos: TodoItem[] = [];
+  let projectRoot: string | null = null;
 
   // streaming stats (for the working-indicator readout)
   let streamStart = 0;
@@ -291,7 +295,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   }
 
   // ---- commands / shortcut / flag ---------------------------------------
-  for (const mode of ["default", "plan", "accept-edits", "auto"] as Mode[]) {
+  for (const mode of ["ask", "plan", "auto"] as Mode[]) {
     pi.registerCommand(mode, {
       description: `Switch to ${MODE_META[mode].label} mode`,
       handler: async (_args, ctx) => setMode(mode, ctx),
@@ -300,11 +304,16 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
 
   pi.registerCommand("mode", {
     description:
-      "Show or set the permission mode (default | plan | accept-edits | auto)",
+      "Show or set the permission mode (ask | plan | auto)",
     handler: async (args, ctx) => {
       const arg = (args ?? "").trim();
       if (arg && (MODE_CYCLE as string[]).includes(arg)) {
         setMode(arg as Mode, ctx);
+        return;
+      }
+      // Accept "default" as an alias for "ask" during migration period.
+      if (arg === "default") {
+        setMode("ask", ctx);
         return;
       }
       if (!ctx.hasUI) return;
@@ -336,7 +345,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerShortcut("shift+tab", {
-    description: "Cycle mode: Default → Plan → Accept-edits → Auto",
+    description: "Cycle mode: Ask → Plan → Auto",
     handler: async (ctx) => cycleMode(ctx),
   });
 
@@ -389,9 +398,9 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   // flag must use a distinct name to avoid being shadowed at parse time.
   pi.registerFlag("permission-mode", {
     description:
-      "Start in a permission mode: default, plan, accept-edits, or auto",
+      "Start in a permission mode: ask, plan, or auto (accepts 'default' as alias for 'ask')",
     type: "string",
-    default: "default",
+    default: "ask",
   });
 
   // ---- tool_call gate ----------------------------------------------------
@@ -399,8 +408,15 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     const tool = event.toolName;
     const input = (event.input ?? {}) as Record<string, unknown>;
 
-    // PLAN: edit/write already stripped; restrict bash to the read-only allowlist.
+    // PLAN: edit/write already stripped via setActiveTools; defensive block in case
+    // the tool still reaches us (e.g., during the same turn before activeTools is updated).
     if (currentMode === "plan") {
+      if (tool === "edit" || tool === "write") {
+        return {
+          block: true,
+          reason: `Plan mode: edit/write disabled. Use /plan to exit plan mode first.`,
+        };
+      }
       if (tool === "bash") {
         const cmd = String(input.command ?? "");
         if (!isSafeCommand(cmd)) {
@@ -413,12 +429,58 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       return undefined;
     }
 
-    // AUTO: approve everything.
-    if (currentMode === "auto") return undefined;
+    // AUTO: approve everything, except prompt for edit/write/bash that target
+    // paths outside cwd that are also outside the detected project root.
+    // Reads are always auto-approved (read-only).
+    if (currentMode === "auto") {
+      if (tool === "read" || tool === "grep" || tool === "find" || tool === "ls") {
+        return undefined;
+      }
+      const pathStr = String(input.path ?? "");
+      const cmdStr = tool === "bash" ? String(input.command ?? "") : "";
+      const outside =
+        (pathStr && isOutsideCwd(pathStr, ctx.cwd)) ||
+        (cmdStr && commandTargetsOutsideCwd(cmdStr, ctx.cwd));
+      if (outside && !isInsideProject(pathStr || ".", ctx.cwd, projectRoot)) {
+        const label = pathStr
+          ? `outside cwd on "${pathStr}"`
+          : `outside cwd on "${cmdStr}"`;
+        return promptApproval(ctx, tool, label);
+      }
+      return undefined;
+    }
 
-    // ACCEPT-EDITS: auto-approve edit/write; mutating bash still prompts.
-    if (currentMode === "accept-edits") {
-      if (tool === "edit" || tool === "write") return undefined;
+    // ASK: prompt on edit/write (with "Allow all → auto"); prompt on read outside cwd;
+    // inside-cwd reads auto-approved; mutating bash prompts.
+    if (currentMode === "ask") {
+      // Read operations: prompt if outside cwd, auto-approve if inside cwd.
+      if (tool === "read" || tool === "grep" || tool === "find" || tool === "ls") {
+        const pathStr = String(input.path ?? "");
+        if (pathStr && isOutsideCwd(pathStr, ctx.cwd)) {
+          return promptApproval(ctx, tool, `outside cwd on "${pathStr}"`);
+        }
+        return undefined;
+      }
+      if (tool === "edit" || tool === "write") {
+        const path = String(input.path ?? "(unknown)");
+        if (!ctx.hasUI)
+          return {
+            block: true,
+            reason: `${tool} blocked: no UI available to confirm.`,
+          };
+        const choice = await ctx.ui.select(`Allow ${tool} on ${path}?`, [
+          "Allow",
+          "Allow all (enable auto)",
+          "Block",
+        ]);
+        if (choice === "Allow all (enable auto)") {
+          setMode("auto", ctx);
+          return undefined;
+        }
+        if (choice !== "Allow")
+          return { block: true, reason: `${tool} blocked by user on ${path}` };
+        return undefined;
+      }
       if (tool === "bash") {
         const cmd = String(input.command ?? "");
         if (isSafeCommand(cmd)) return undefined;
@@ -427,32 +489,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       return undefined;
     }
 
-    // DEFAULT: prompt on edit/write (with "Allow all → auto"); mutating bash prompts.
-    if (tool === "edit" || tool === "write") {
-      const path = String(input.path ?? "(unknown)");
-      if (!ctx.hasUI)
-        return {
-          block: true,
-          reason: `${tool} blocked: no UI available to confirm.`,
-        };
-      const choice = await ctx.ui.select(`Allow ${tool} on ${path}?`, [
-        "Allow",
-        "Allow all (enable auto)",
-        "Block",
-      ]);
-      if (choice === "Allow all (enable auto)") {
-        setMode("auto", ctx);
-        return undefined;
-      }
-      if (choice !== "Allow")
-        return { block: true, reason: `${tool} blocked by user on ${path}` };
-      return undefined;
-    }
-    if (tool === "bash") {
-      const cmd = String(input.command ?? "");
-      if (isSafeCommand(cmd)) return undefined;
-      return promptApproval(ctx, tool, `"${cmd}"`);
-    }
+    // Fallback: unknown tool or mode — let through.
     return undefined;
   });
 
@@ -527,20 +564,26 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       persistState();
     }
 
-    // if (currentMode === "auto" && !isStepping) {
-    //   if (autoFollowUpDepth > 0 && autoFollowUpCount >= autoFollowUpDepth)
-    //     return;
-    //   if (hasToolCalls(msg) && !isCompletionSignal(text)) {
-    //     isStepping = true;
-    //     autoFollowUpCount++;
-    //     pi.sendUserMessage(
-    //       "Continue. Auto mode is active — proceed without asking.",
-    //       {
-    //         deliverAs: "followUp",
-    //       },
-    //     );
-    //   }
-    // }
+    if (currentMode === "auto" && !isStepping) {
+      if (autoFollowUpDepth > 0 && autoFollowUpCount >= autoFollowUpDepth)
+        return;
+      if (hasToolCalls(msg) && !isCompletionSignal(text)) {
+        isStepping = true;
+        autoFollowUpCount++;
+        try {
+          pi.sendUserMessage(
+            "Continue. Auto mode is active — proceed without asking.",
+            {
+              deliverAs: "followUp",
+            },
+          );
+        } catch (err) {
+          // followUp delivery not supported in this pi version — disable stepping
+          isStepping = false;
+          console.warn("[permission-modes] auto follow-up unavailable:", err);
+        }
+      }
+    }
   });
 
   // ---- agent_end: idle reset + plan complete + plan offer ----------------
@@ -618,8 +661,12 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
     ctx: ExtensionContext,
   ): Promise<void> {
     const flag = pi.getFlag("permission-mode");
-    if (typeof flag === "string" && (MODE_CYCLE as string[]).includes(flag)) {
-      currentMode = flag as Mode;
+    if (typeof flag === "string") {
+      if ((MODE_CYCLE as string[]).includes(flag)) {
+        currentMode = flag as Mode;
+      } else if (flag === "default" || flag === "accept-edits") {
+        currentMode = "ask";
+      }
     }
 
     // Restore the latest persisted mode entry (overrides the flag).
@@ -630,7 +677,9 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
         .find((e: any) => e?.type === "custom" && e?.customType === "modes");
       if (last?.data) {
         let m = last.data.currentMode;
-        if (m === "normal") m = "default"; // legacy
+        if (m === "normal") m = "default";      // legacy (v0.x)
+        if (m === "default") m = "ask";          // v1.0.0 → v2.0.0 rename
+        if (m === "accept-edits") m = "ask";     // removed mode → fall back to ask
         if ((MODE_CYCLE as string[]).includes(m)) currentMode = m;
         if (typeof last.data.autoFollowUpDepth === "number")
           autoFollowUpDepth = last.data.autoFollowUpDepth;
@@ -643,6 +692,15 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       gitBranch = (ctx.sessionManager as any).getGitBranch?.() ?? "";
     } catch {
       /* ignore */
+    }
+
+    // Cache the project root once per session.
+    if (projectRoot === null) {
+      try {
+        projectRoot = findProjectRoot(ctx.cwd);
+      } catch {
+        projectRoot = null;
+      }
     }
 
     applyToolRestrictions();
