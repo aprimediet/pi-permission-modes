@@ -4,7 +4,7 @@ Guide for coding agents working in this repository. Product context (goals, user
 features, success metrics): see [docs/PRD.md](docs/PRD.md).
 
 ## Summary
-A pi extension that implements Claude-Code-style permission modes (ask / plan / auto) for the pi coding agent, published on npm as `@aprimediet/permission-modes@1.1.0`. It intercepts tool calls, gates approvals per mode, injects mode-specific context, provides a live footer + status pill, guards reads outside cwd in ask mode, and supports auto-mode follow-up bounded by `/auto-depth`.
+A pi extension that implements Claude-Code-style permission modes (ask / plan / auto) for the pi coding agent, published on npm as `@aprimediet/permission-modes@1.1.2`. It intercepts tool calls, gates approvals per mode, injects mode-specific context, provides a live footer + status pill, guards reads outside cwd in ask mode, supports auto-mode follow-up bounded by `/auto-depth`, and (v1.1.1+) auto-switches the model per mode when the user has defined profiles in `~/.pi/agent/model-profiles.json`. v1.1.2 adds an `Alt+I` shortcut to cycle through those profiles.
 
 ## Tech Stack
 - **Language:** TypeScript (ESM — `"type": "module"`)
@@ -18,6 +18,8 @@ A pi extension that implements Claude-Code-style permission modes (ask / plan / 
 permission-modes/             # @aprimediet/permission-modes
 ├── package.json              # pi manifest + npm package metadata
 ├── index.ts                  # main extension — default-exported factory function
+├── profiles.ts               # model-profile config helpers (load, resolve, parse)
+├── profiles.test.ts          # unit tests for profiles.ts (vitest)
 ├── utils.ts                  # pure helpers: bash allowlist, Plan: extraction, [DONE:n] tracking
 ├── index.test.ts             # integration tests (vitest)
 ├── utils.test.ts             # unit tests for utils (vitest)
@@ -46,9 +48,12 @@ permission-modes/             # @aprimediet/permission-modes
 |---|---|
 | Switch mode | `/ask`, `/plan`, `/auto`, or `/mode` (`/default` works as alias) |
 | Set auto depth | `/auto-depth <n>` (0 = unlimited; default 20) |
+| Switch model profile | `/model-profile` (selector) or `/model-profile <name>`; `/model-profile list` to print all |
 | Shortcut | `Shift+Tab` to cycle modes |
 | Shortcut | `Alt+T` to cycle thinking level |
+| Shortcut | `Alt+I` to cycle through model profiles |
 | Start flag | `pi --permission-mode <name>` |
+| Start flag | `pi --model-profile <name>` (activates a named profile) |
 | Load in dev | `pi -e ./extensions/permission-modes/index.ts` |
 | Hot-reload | `/reload` (after edits) |
 | Verify loaded | `pi list` |
@@ -73,16 +78,18 @@ permission-modes/             # @aprimediet/permission-modes
 ## Boundaries (technical)
 - **Do NOT** add third-party runtime dependencies — peer deps only (pi-core + typebox)
 - **Do NOT** change pi's core behavior — only intercept tool calls via `pi.on("tool_call", ...)` and return `{ block: true, reason }` or `undefined`
-- **Do NOT** modify the model or switch models — this extension only changes approval behavior
+- **Do NOT** modify the model outside an explicit user-defined profile — `pi.setModel()` is only called when the user has opted in via `~/.pi/agent/model-profiles.json` (i.e. `activeProfile !== undefined`). When no profile is active, the extension works exactly as v1.1.0.
 - **Do NOT** duplicate content between AGENTS.md and CLAUDE.md — keep AGENTS.md as the single source of truth
 - **Safe to delete:** `.pi/permission-modes-45ea0551.md` (recreated automatically)
-- **Invariants:** The three-mode cycle (ask → plan → auto) is hard-coded in `MODE_CYCLE`; accept-edits was removed and default was renamed to ask in v2.0.0. The plan-mode tool restrictions (`PLAN_TOOLS`, `PLAN_DISABLED`) and bash safe/destructive patterns are in `utils.ts`. Change these with care.
+- **Invariants:** The three-mode cycle (ask → plan → auto) is hard-coded in `MODE_CYCLE`; accept-edits was removed and default was renamed to ask in v2.0.0. The plan-mode tool restrictions (`PLAN_TOOLS`, `PLAN_DISABLED`) and bash safe/destructive patterns are in `utils.ts`. The model-profile config file path is `~/.pi/agent/model-profiles.json` (NOT `models.json`, which is reserved for pi's custom provider definitions). Change these with care.
 
 ## Known Issues & Gotchas
-- **Test infrastructure exists** — 64 tests across `index.test.ts` and `utils.test.ts` using vitest. Always run `npm test` before committing non-trivial changes.
+- **Test infrastructure exists** — 105 tests across `index.test.ts`, `profiles.test.ts`, and `utils.test.ts` using vitest. Always run `npm test` before committing non-trivial changes.
 - The `--permission-mode` flag uses a distinct name because pi has a built-in `--mode` flag for output format (text/json/rpc). Do not rename it to `--mode`.
-- Auto mode follow-up logic is currently **commented out** in `index.ts` (the `turn_end` handler block). Re-enable when auto-continue support in pi is stable.
+- Auto mode follow-up logic is currently enabled in `index.ts` (the `turn_end` handler block); failures are caught with `console.warn` so a missing followUp support in older pi versions degrades gracefully.
 - `typebox` is listed as a peer dep but not currently imported. It may be needed for future input validation.
+- **Model profile config path is `~/.pi/agent/model-profiles.json`**, NOT `models.json`. Pi uses the latter for custom provider definitions; using a different name avoids format conflict.
+- The `modelsPath` export is mutable via `setModelsPath(p)` to allow tests to redirect to a tmpdir fixture. Don't rely on assignment to the exported binding directly (ESM forbids it).
 - No `.env` / `.env.example` — this extension has no environment secrets.
 - No `tsconfig.json` — pi bundles its own TypeScript configuration.
 - **Registry indexing lag:** `npm view` can return stale data for a few minutes after publish. Verify via direct GET to `https://registry.npmjs.org/@aprimediet/permission-modes/<version>`.
@@ -93,7 +100,7 @@ permission-modes/             # @aprimediet/permission-modes
 - **memory (@aprimediet/memory):** Active (8+ entries). Durable facts are stored at `~/.pi/projects/permission-modes-45ea0551/memory/`. Use `memory_write` to save decisions/gotchas and `memory_search` to recall context.
 
 ## Current Focus
-- **v1.1.0** published on npm (`@aprimediet/permission-modes@1.1.0`)
-- 64 passing tests (vitest)
-- Next: solicit user feedback; re-enable auto follow-up when pi stabilizes; publish patches as needed
+- **v1.1.2** built but not yet published (`@aprimediet/permission-modes@1.1.2`)
+- 112 passing tests (vitest) — 42 utils + 31 profiles + 39 index integration
+- New in v1.1.2: `Alt+I` shortcut to cycle through model profiles; fixed `applyProfileModelForMode` so in-memory profile switches (`/model-profile <name>`, `Alt+I`) actually re-apply the model mapping
 - See [CHANGELOG.md](CHANGELOG.md) for full release history

@@ -4,6 +4,7 @@
 > **Supersedes:** v1.0.0's four-mode cycle (default / plan / accept-edits / auto)
 > **Date:** 2026-06-28
 > **Reference format:** Inspired by [codewalker's design suggestion](../codewalker/docs/claude-suggestion.md)
+> **Related:** [v1.1.1-suggestions.md](../../.pi/plan/v1.1.1-suggestions.md) — per-mode model profiles (implemented in v1.1.1 / v2.1)
 
 ---
 

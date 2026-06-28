@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@aprimediet/permission-modes)](https://www.npmjs.com/package/@aprimediet/permission-modes)
 [![License](https://img.shields.io/npm/l/@aprimediet/permission-modes)](LICENSE)
 
-Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Three modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. The model is **not** changed per mode — only the approval behavior.
+Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Three modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. v1.1.1 adds **per-mode model profiles** — when you switch modes, the model can switch with you.
 
 ## Modes
 
@@ -17,6 +17,32 @@ Claude-Code-style **permission modes** for the [pi coding agent](https://www.npm
 
 When there is no interactive UI (`pi -p`, `--mode json`), anything that would prompt is **blocked** instead of silently allowed.
 
+## Model profiles (v1.1.1)
+
+Define named profiles in `~/.pi/agent/model-profiles.json` mapping each mode to a model ID:
+
+```json
+{
+  "active": "default",
+  "default": {
+    "ask":  "anthropic/claude-opus-4-5",
+    "plan": "anthropic/claude-opus-4-5",
+    "auto": "anthropic/claude-haiku-4-5"
+  },
+  "fast": {
+    "ask":  "anthropic/claude-haiku-4-5",
+    "plan": "anthropic/claude-haiku-4-5",
+    "auto": "anthropic/claude-haiku-4-5"
+  }
+}
+```
+
+A model ID is `"provider/model"` or `"provider/model:thinking"` (the `:thinking` suffix sets the thinking level after the switch — e.g. `anthropic/claude-sonnet-4-5:high`). When the mode changes, the extension auto-switches the model via `pi.setModel()`. The footer shows `profile:<name> · model/thinking` when a profile is active.
+
+If the file doesn't exist on first install, the extension creates it for you (pre-filled with the user's default model from `~/.pi/agent/settings.json` when available).
+
+**Why a separate `model-profiles.json` and not pi's built-in `models.json`?** Pi uses `~/.pi/agent/models.json` for custom provider definitions; using a different filename avoids format conflict.
+
 ## Commands, shortcut, flag
 
 | Kind | Name | Behavior |
@@ -24,8 +50,13 @@ When there is no interactive UI (`pi -p`, `--mode json`), anything that would pr
 | Command | `/ask`, `/plan`, `/auto` | switch to that mode (`/default` also works as alias) |
 | Command | `/mode [name]` | set the given mode, or pick from a list |
 | Command | `/auto-depth <n>` | cap auto-mode follow-ups (`0` = unlimited; default 20) |
+| Command | `/model-profile` | show selector of available profiles |
+| Command | `/model-profile <name>` | activate the named profile (also `/model-profile list` to print them) |
 | Shortcut | `Shift+Tab` | cycle modes |
+| Shortcut | `Alt+T` | cycle thinking level (off → minimal → low → medium → high → xhigh) |
+| Shortcut | `Alt+I` | cycle model profile (next profile from `~/.pi/agent/model-profiles.json`; re-applies the model for the current mode) |
 | Flag | `--permission-mode <name>` | start in a mode (accepts `ask`, `plan`, `auto`, or `default` as alias; default `ask`) |
+| Flag | `--model-profile <name>` | start with a named profile activated |
 
 > The start-mode flag is `--permission-mode` (not `--mode`) because pi already has a built-in `--mode` for output format (text/json/rpc).
 
@@ -39,10 +70,10 @@ In plan mode the agent explores read-only and emits a numbered list under a `Pla
 
 ## UI
 
-- A status pill and a custom footer showing **mode · cwd [git-branch] · provider/model**.
+- A status pill and a custom footer showing **mode · cwd [git-branch] · provider/model** (or **profile:name · provider/model** when a profile is active).
 - While the agent is streaming, the working indicator shows live **token / tok-s / cost / % context** stats; it reverts to the default loader when idle.
 
-Current mode and the auto-follow-up depth **persist** across `/reload` and session resume.
+Current mode, the auto-follow-up depth, and the active profile name **persist** across `/reload` and session resume.
 
 ## Install / run
 
@@ -77,6 +108,8 @@ See [CHANGELOG.md](CHANGELOG.md) for the full release history.
 permission-modes/             # @aprimediet/permission-modes
 ├── package.json              # pi manifest + npm package metadata
 ├── index.ts                  # main extension (default-exported factory)
+├── profiles.ts               # NEW in v1.1.1: model-profile config helpers
+├── profiles.test.ts          # NEW in v1.1.1: unit tests for profiles
 ├── utils.ts                  # bash allowlist + Plan: + [DONE:n] helpers
 ├── index.test.ts             # integration tests (vitest)
 ├── utils.test.ts             # unit tests (vitest)
@@ -92,4 +125,4 @@ permission-modes/             # @aprimediet/permission-modes
         └── auto-mode-prompts.md
 ```
 
-Third-party deps: none. Peer dependencies (bundled by pi): `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-tui`, `typebox`. The model is never switched — pi keeps one model across all modes, and the footer only *displays* it.
+Third-party deps: none. Peer dependencies (bundled by pi): `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-tui`, `typebox`. The model is switched **only when the user opts in via `~/.pi/agent/model-profiles.json`** — without a profile config file, the model never changes and the extension behaves exactly as in v1.1.0.

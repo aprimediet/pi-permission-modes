@@ -1,6 +1,6 @@
 # Product Requirements Document: permission-modes
 
-**Version:** 2.0
+**Version:** 2.1
 **Date:** 2026-06-28
 **Status:** Implemented
 
@@ -11,17 +11,18 @@ A Claude-Code-style permission-mode system for the pi coding agent. Three modes 
 The pi coding agent lacks granular permission controls during a session. Users who want different levels of autonomy — from full manual approval for every edit to completely hands-off execution — have no way to switch. This friction makes pi less productive than tools like Claude Code that offer mode-based workflows.
 
 ## Goals
-- Provide four distinct permission modes that control how tool calls (edit, write, bash) are approved
+- Provide three distinct permission modes that control how tool calls (edit, write, bash) are approved
 - Let users cycle modes easily via Shift+Tab keyboard shortcut
 - Show the current mode in the UI via a status pill and custom footer
 - Persist the current mode and auto-follow-up depth across session restarts
 - In Plan mode: restrict to read-only exploration, produce a structured plan, then optionally execute it step by step with [DONE:n] tracking
+- Optionally swap the AI model per mode via user-defined model profiles stored at `~/.pi/agent/model-profiles.json`
 
 ## Non-Goals
 - Safety guardrails (out of scope — this extension only manages approval behavior, not model-level safety)
-- Switching the AI model per mode (the model stays the same; only approval behavior changes)
 - Replacing pi's built-in `--mode` flag for output format (text/json/rpc)
 - Providing a full CLI or standalone application (this is a pi extension only)
+- Auto-switching models without an explicit user-defined profile (no implicit mode→model mapping; the extension only acts when the user has opted in via the config file)
 
 ## Target Users
 - Developers who use the pi coding agent for daily development
@@ -36,14 +37,17 @@ Cycle through three modes with Shift+Tab: Ask (prompt on edits + reads outside c
 ### Plan Mode with Todo Tracking
 In Plan mode, edits and writes are disabled and bash is restricted to read-only commands. After exploration, the agent emits a numbered `Plan:` list. The user can execute the plan (switches to auto mode with step tracking via `[DONE:n]` tags), stay in plan mode, or refine the plan.
 
+### Per-Mode Model Profiles (v1.1.1)
+Users define named profiles in `~/.pi/agent/model-profiles.json` mapping each mode (ask / plan / auto) to a model ID (`"provider/model"` or `"provider/model:thinking"`). When the mode changes, the extension auto-switches the model via `pi.setModel()`. Profiles are activated via `/model-profile` (with optional selector or `<name>` argument) or the `--model-profile <name>` start flag, and persisted across session resume. The footer shows `profile:<name> · model/thinking` when a profile is active. Lazy re-read on every mode switch picks up edits to the config without requiring `/reload`.
+
 ### UI Integration
-A status pill shows the current mode with color-coded role (muted/warning/success/accent). A custom footer displays mode · current-working-directory [git-branch] · model/thinking-level. During execution, live token stats and context usage are shown.
+A status pill shows the current mode with color-coded role (muted/warning/success/accent). A custom footer displays mode · current-working-directory [git-branch] · model/thinking-level (or `profile:name · model/thinking-level` when a profile is active). During execution, live token stats and context usage are shown.
 
 ### Keybinding
 Shift+Tab cycles permission modes; Alt+T cycles the thinking level (off → minimal → low → medium → high → xhigh). Both are custom keybindings that integrate with pi's shortcut system.
 
 ### Persistence
-The current mode and auto-mode follow-up depth cap are persisted across `/reload` and session resume via pi's entry storage.
+The current mode, auto-mode follow-up depth cap, and active profile name are persisted across `/reload` and session resume via pi's entry storage.
 
 ## Success Metrics
 - Users can switch modes as easily as they do in Claude Code
@@ -52,8 +56,9 @@ The current mode and auto-mode follow-up depth cap are persisted across `/reload
 
 ## Scope & Boundaries
 - **In scope:** A pi extension that intercepts `tool_call` events to gate approvals, injects mode-specific context into the agent loop, and provides UI feedback via pi's extension API
-- **In scope:** Commands, shortcuts, and a start-up flag (`--permission-mode`) to select the initial mode
-- **Out of scope:** Any changes to pi's core, the AI model, or safety guardrails
+- **In scope:** Commands, shortcuts, and start-up flags (`--permission-mode`, `--model-profile`) to select the initial mode / profile
+- **Out of scope:** Any changes to pi's core or safety guardrails
+- **In scope (v1.1.1):** Optional `pi.setModel()` calls driven by user-defined profile config — but only when the user has opted in via `~/.pi/agent/model-profiles.json`
 - **Out of scope:** Third-party dependencies beyond pi's core peer packages (@earendil-works/pi-coding-agent, @earendil-works/pi-ai, @earendil-works/pi-tui, typebox)
 
 ## Open Questions

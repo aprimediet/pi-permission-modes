@@ -11,22 +11,46 @@
 import { describe, expect, it, beforeEach, vi } from "vitest"
 
 import permissionModesExtension from "./index.ts"
+import { setModelsPath } from "./profiles.ts"
 
 // ---- minimal fake pi API ------------------------------------------------
 
 type Handler = (event: unknown, ctx: unknown) => unknown | Promise<unknown>
 
+type CommandHandler = (
+	args: string,
+	ctx: unknown,
+) => unknown | Promise<unknown>
+
 interface FakePi {
 	handlers: Map<string, Handler[]>
+	commands: Map<string, CommandHandler>
+	shortcuts: Map<string, Handler>
 	userMessages: Array<{ text: string; opts?: unknown }>
+	sentMessages: Array<{
+		message: { customType?: string; content?: unknown; display?: boolean }
+		opts?: unknown
+	}>
 	appendEntries: Array<{ type: string; data: unknown }>
 	activeTools: string[]
 	flags: Record<string, unknown>
+	setModelCalls: Array<{ model: unknown }>
+	thinkingLevel: string
+	modelRegistry: Map<string, Map<string, unknown>>
 	getToolCallHandler: (mode?: string) => Handler | undefined
-	simulateSessionStart: (cwd: string, ui?: unknown) => Promise<void>
+	simulateSessionStart: (
+		cwd: string,
+		ui?: unknown,
+		registry?: { find: (provider: string, model: string) => unknown },
+	) => Promise<void>
 	simulateToolCall: (
 		toolName: string,
 		input: Record<string, unknown>,
+		ctx: object,
+	) => Promise<unknown>
+	simulateCommand: (name: string, args: string, ctx: object) => Promise<unknown>
+	simulateShortcut: (
+		key: string,
 		ctx: object,
 	) => Promise<unknown>
 }
@@ -44,27 +68,58 @@ interface FakeCtxOptions {
 
 function createFakePi(): FakePi {
 	const handlers = new Map<string, Handler[]>()
+	const commands = new Map<string, CommandHandler>()
+	const shortcuts = new Map<string, Handler>()
 	const userMessages: Array<{ text: string; opts?: unknown }> = []
+	const sentMessages: Array<{
+		message: { customType?: string; content?: unknown; display?: boolean }
+		opts?: unknown
+	}> = []
 	const appendEntries: Array<{ type: string; data: unknown }> = []
 	const activeTools = ["read", "edit", "write", "bash", "grep", "find"]
 	const flags: Record<string, unknown> = { "permission-mode": "ask" }
+	const setModelCalls: Array<{ model: unknown }> = []
+	let thinkingLevel = "off"
+	const modelRegistry = new Map<string, Map<string, unknown>>()
 
 	const pi = {
 		handlers,
+		commands,
+		shortcuts,
 		userMessages,
+		sentMessages,
 		appendEntries,
 		activeTools,
 		flags,
+		setModelCalls,
+		getThinkingLevel: () => thinkingLevel,
+		setThinkingLevel: (l: string) => {
+			thinkingLevel = l
+		},
+		modelRegistry: {
+			find: (provider: string, model: string) => {
+				const providerMap = modelRegistry.get(provider)
+				if (!providerMap) return undefined
+				return providerMap.get(model)
+			},
+		},
 
 		on(event: string, handler: Handler) {
 			const list = handlers.get(event) ?? []
 			list.push(handler)
 			handlers.set(event, list)
 		},
-		registerCommand() {},
-		registerShortcut() {},
+		registerCommand(name: string, def: { handler: CommandHandler }) {
+			commands.set(name, def.handler)
+		},
+		registerShortcut(key: string, def: { handler: Handler }) {
+			shortcuts.set(key, def.handler)
+		},
 		registerFlag(name: string, def: { default?: unknown }) {
+			// Always record the flag so the extension can read it via getFlag.
+			// Default is honored when provided.
 			if (def?.default !== undefined) flags[name] = def.default
+			else if (!(name in flags)) flags[name] = undefined
 		},
 		getFlag(name: string) {
 			return flags[name]
@@ -82,16 +137,31 @@ function createFakePi(): FakePi {
 		sendUserMessage(text: string, opts?: unknown) {
 			userMessages.push({ text, opts })
 		},
-		sendMessage() {},
+		sendMessage(message: unknown, opts?: unknown) {
+			sentMessages.push({ message: message as never, opts })
+		},
+		async setModel(model: unknown) {
+			setModelCalls.push({ model })
+			return true
+		},
 
 		// Test helpers
 		getToolCallHandler() {
 			const list = handlers.get("tool_call") ?? []
 			return list[0]
 		},
-		async simulateSessionStart(cwd: string, ui?: unknown) {
+		async simulateSessionStart(
+			cwd: string,
+			ui?: unknown,
+			registry?: { find: (provider: string, model: string) => unknown },
+		) {
 			const list = handlers.get("session_start") ?? []
-			for (const h of list) await h({}, { cwd, hasUI: !!ui, ui })
+			const fullCtx = makeCtx(pi, {
+				cwd,
+				ui: (ui ?? {}) as FakeCtxOptions["ui"],
+				modelRegistry: registry ?? pi.modelRegistry,
+			})
+			for (const h of list) await h({}, fullCtx)
 		},
 		async simulateToolCall(
 			toolName: string,
@@ -105,6 +175,16 @@ function createFakePi(): FakePi {
 			}
 			return undefined
 		},
+		async simulateCommand(name: string, args: string, ctx: object) {
+			const handler = commands.get(name)
+			if (!handler) throw new Error(`No command registered: ${name}`)
+			return handler(args, ctx)
+		},
+		async simulateShortcut(key: string, ctx: object) {
+			const handler = shortcuts.get(key)
+			if (!handler) throw new Error(`No shortcut registered: ${key}`)
+			return handler(ctx)
+		},
 	}
 	return pi
 }
@@ -115,11 +195,17 @@ function makeFakePiForExtension(p: FakePi) {
 	return p as unknown as Parameters<typeof permissionModesExtension>[0]
 }
 
-function makeCtx(p: FakePi, opts: FakeCtxOptions) {
+function makeCtx(
+	p: FakePi,
+	opts: FakeCtxOptions & {
+		modelRegistry?: { find: (provider: string, model: string) => unknown }
+	},
+) {
 	const ui = opts.ui ?? {}
 	return {
 		cwd: opts.cwd,
 		hasUI: !!opts.ui,
+		modelRegistry: opts.modelRegistry ?? p.modelRegistry,
 		ui: {
 			select: ui.select ?? (async () => "Block"),
 			notify: ui.notify ?? (() => {}),
@@ -446,5 +532,426 @@ describe("permission-modes extension: auto follow-up", () => {
 		expect(consoleSpy).toHaveBeenCalled()
 		consoleSpy.mockRestore()
 		pi.sendUserMessage = originalSendUserMessage
+	})
+})
+
+// ---- model profile tests -----------------------------------------------
+//
+// Profile helpers live in profiles.ts (unit-tested in profiles.test.ts).
+// These integration tests verify the wiring between profiles.ts and
+// index.ts: session-start flag, command handlers, mode-switch hook,
+// session-restore, and persistence.
+
+describe("permission-modes extension: model profiles", () => {
+	let pi: FakePi
+
+	beforeEach(() => {
+		pi = createFakePi()
+	})
+
+	function setupProfile(cfg: unknown) {
+		const fs = require("node:fs") as typeof import("node:fs")
+		const path = require("node:path") as typeof import("node:path")
+		const tmp = path.join(
+			"/tmp",
+			`pm-int-mp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`,
+		)
+		setModelsPath(tmp)
+		fs.writeFileSync(tmp, JSON.stringify(cfg))
+		return tmp
+	}
+
+	it("ensureModelProfilesConfig runs on session_start and persists activeProfile in entry", async () => {
+		setupProfile({
+			active: "main",
+			main: { ask: "p1/a" },
+		})
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src")
+		// After session_start with no flag, persistState is not yet called.
+		// Trigger a mode switch to force persist.
+		await pi.simulateCommand("auto", "", makeCtx(pi, { cwd: "/home/user/project/src" }))
+		const last = pi.appendEntries[pi.appendEntries.length - 1]
+		expect(last.type).toBe("modes")
+		expect((last.data as any).currentMode).toBe("auto")
+	})
+
+	it("applyProfileModelForMode switches model when profile is active and mapping exists", async () => {
+		setupProfile({
+			active: "main",
+			main: { ask: "prov1/askModel", plan: "prov1/planModel", auto: "prov1/autoModel" },
+		})
+		const fakeModel = { id: "askModel" }
+		pi.flags["model-profile"] = "main"
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src", undefined, {
+			find: (provider: string, model: string) => {
+				if (provider === "prov1" && model === "askModel") return fakeModel
+				return undefined
+			},
+		})
+		expect(pi.setModelCalls.length).toBeGreaterThan(0)
+		expect(pi.setModelCalls[0].model).toBe(fakeModel)
+	})
+
+	it("applyProfileModelForMode warns (not crashes) when model is not in registry", async () => {
+		setupProfile({
+			active: "main",
+			main: { ask: "missing/missing" },
+		})
+		pi.flags["model-profile"] = "main"
+		const notifs: string[] = []
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src", {
+			notify: (m: string) => notifs.push(m),
+			select: async () => "Block",
+		}, {
+			find: () => undefined,
+		})
+		expect(pi.setModelCalls.length).toBe(0)
+		expect(notifs.some((n) => /not found/i.test(n))).toBe(true)
+	})
+
+	it("applyProfileModelForMode warns when setModel returns false (no API key)", async () => {
+		setupProfile({
+			active: "main",
+			main: { ask: "prov1/askModel" },
+		})
+		pi.flags["model-profile"] = "main"
+		// Override setModel to return false (simulates missing API key)
+		const fakePi = pi as unknown as { setModel: (m: unknown) => Promise<boolean> }
+		const originalSetModel = fakePi.setModel
+		fakePi.setModel = async () => false
+		const notifs: string[] = []
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src", {
+			notify: (m: string) => notifs.push(m),
+			select: async () => "Block",
+		}, {
+			find: () => ({ id: "askModel" }),
+		})
+		expect(pi.setModelCalls.length).toBe(0)
+		expect(notifs.some((n) => /api key|no api/i.test(n))).toBe(true)
+		fakePi.setModel = originalSetModel
+	})
+
+	it("setMode re-applies the model when profile is active", async () => {
+		setupProfile({
+			active: "main",
+			main: { ask: "p/askM", plan: "p/planM", auto: "p/autoM" },
+		})
+		const fakeModels: Record<string, unknown> = {
+			askM: { id: "askM" },
+			planM: { id: "planM" },
+			autoM: { id: "autoM" },
+		}
+		const registry = {
+			find: (_provider: string, model: string) => fakeModels[model],
+		}
+		pi.flags["model-profile"] = "main"
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src", undefined, registry)
+		const initialCalls = pi.setModelCalls.length
+		// Switch mode → should re-resolve and call setModel for the new mode's mapping.
+		await pi.simulateCommand(
+			"plan",
+			"",
+			makeCtx(pi, { cwd: "/home/user/project/src", modelRegistry: registry }),
+		)
+		expect(pi.setModelCalls.length).toBe(initialCalls + 1)
+		expect(pi.setModelCalls[pi.setModelCalls.length - 1].model).toEqual({
+			id: "planM",
+		})
+	})
+
+	it("activeProfile is persisted in the modes entry after a profile switch", async () => {
+		setupProfile({
+			active: "alpha",
+			alpha: { ask: "p/a" },
+			beta: { ask: "p/b" },
+		})
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src")
+		// Activate beta via /model-profile beta
+		await pi.simulateCommand(
+			"model-profile",
+			"beta",
+			makeCtx(pi, { cwd: "/home/user/project/src" }),
+		)
+		const last = pi.appendEntries[pi.appendEntries.length - 1]
+		expect((last.data as any).activeProfile).toBe("beta")
+	})
+
+	it("session restore re-applies the persisted profile's model", async () => {
+		setupProfile({
+			active: "main",
+			main: { ask: "prov1/askModel", plan: "prov1/planModel", auto: "prov1/autoModel" },
+		})
+		const fakeModel = { id: "planModel" }
+		const entries = [
+			{
+				type: "custom",
+				customType: "modes",
+				data: { currentMode: "plan", autoFollowUpDepth: 20, activeProfile: "main" },
+			},
+		]
+		permissionModesExtension(makeFakePiForExtension(pi))
+		const list = pi.handlers.get("session_start") ?? []
+		for (const h of list) {
+			await h(
+				{},
+				{
+					cwd: "/home/user/project/src",
+					hasUI: false,
+					modelRegistry: {
+						find: (provider: string, model: string) =>
+							provider === "prov1" && model === "planModel"
+								? fakeModel
+								: undefined,
+					},
+					sessionManager: {
+						getBranch: () => entries,
+						getGitBranch: () => "",
+						getEntries: () => entries,
+					},
+				},
+			)
+		}
+		expect(pi.setModelCalls.some((c) => c.model === fakeModel)).toBe(true)
+	})
+
+	it("/model-profile list formats and sends a message", async () => {
+		setupProfile({
+			active: "main",
+			main: { ask: "p/a", plan: "p/p", auto: "p/au" },
+			alt: { ask: "p2/a" },
+		})
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src")
+		await pi.simulateCommand(
+			"model-profile",
+			"list",
+			makeCtx(pi, { cwd: "/home/user/project/src" }),
+		)
+		expect(pi.sentMessages.length).toBe(1)
+		const content = String(pi.sentMessages[0].message.content ?? "")
+		expect(content).toMatch(/main/)
+		expect(content).toMatch(/alt/)
+	})
+
+	it("/model-profile <unknown> shows an 'Unknown profile' notification", async () => {
+		setupProfile({ active: "main", main: { ask: "p/a" } })
+		const notifs: string[] = []
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src", {
+			notify: (m: string) => notifs.push(m),
+			select: async () => "Block",
+		})
+		await pi.simulateCommand(
+			"model-profile",
+			"nonexistent",
+			makeCtx(pi, {
+				cwd: "/home/user/project/src",
+				ui: {
+					notify: (m: string) => notifs.push(m),
+					select: async () => "Block",
+				},
+			}),
+		)
+		expect(notifs.some((n) => /unknown profile/i.test(n))).toBe(true)
+	})
+
+	it("/model-profile with no args shows a selector and activates the chosen profile", async () => {
+		setupProfile({
+			active: "main",
+			main: { ask: "p/a" },
+			alt: { ask: "p2/a" },
+		})
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src")
+		await pi.simulateCommand(
+			"model-profile",
+			"",
+			makeCtx(pi, {
+				cwd: "/home/user/project/src",
+				ui: {
+					select: async (_label: string, options: string[]) =>
+						options.includes("alt") ? "alt" : options[0],
+					notify: () => {},
+				},
+			}),
+		)
+		const last = pi.appendEntries[pi.appendEntries.length - 1]
+		expect((last.data as any).activeProfile).toBe("alt")
+	})
+})
+
+// ---- Alt+I: cycle profile shortcut --------------------------------------
+//
+// Verifies the registered shortcut advances the active profile by one, wraps
+// around, notifies the user, and re-applies the model mapping for the
+// current mode.
+
+describe("permission-modes extension: Alt+I cycle profile shortcut", () => {
+	let pi: FakePi
+
+	beforeEach(() => {
+		pi = createFakePi()
+	})
+
+	function setupProfile(cfg: unknown) {
+		const fs = require("node:fs") as typeof import("node:fs")
+		const path = require("node:path") as typeof import("node:path")
+		const tmp = path.join(
+			"/tmp",
+			`pm-int-cyc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`,
+		)
+		setModelsPath(tmp)
+		fs.writeFileSync(tmp, JSON.stringify(cfg))
+		return tmp
+	}
+
+	it("registers the alt+i shortcut", () => {
+		permissionModesExtension(makeFakePiForExtension(pi))
+		expect(pi.shortcuts.has("alt+i")).toBe(true)
+	})
+
+	it("advances the active profile to the next one and persists the change", async () => {
+		setupProfile({
+			active: "alpha",
+			alpha: { ask: "p/a" },
+			beta: { ask: "p/b" },
+			gamma: { ask: "p/g" },
+		})
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src")
+		// Start active at 'alpha' (from config.active). Cycle should land on 'beta'.
+		await pi.simulateShortcut(
+			"alt+i",
+			makeCtx(pi, {
+				cwd: "/home/user/project/src",
+				ui: { notify: () => {}, select: async () => "Block" },
+			}),
+		)
+		const last = pi.appendEntries[pi.appendEntries.length - 1]
+		expect((last.data as any).activeProfile).toBe("beta")
+	})
+
+	it("wraps from the last profile back to the first", async () => {
+		setupProfile({
+			active: "gamma",
+			alpha: { ask: "p/a" },
+			beta: { ask: "p/b" },
+			gamma: { ask: "p/g" },
+		})
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src")
+		await pi.simulateShortcut(
+			"alt+i",
+			makeCtx(pi, {
+				cwd: "/home/user/project/src",
+				ui: { notify: () => {}, select: async () => "Block" },
+			}),
+		)
+		const last = pi.appendEntries[pi.appendEntries.length - 1]
+		expect((last.data as any).activeProfile).toBe("alpha")
+	})
+
+	it("uses default profile as starting point when no profile is active", async () => {
+		setupProfile({
+			active: "main",
+			main: { ask: "p/a" },
+			alt: { ask: "p2/a" },
+		})
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src")
+		// activeProfile is undefined until set explicitly. Cycle should still
+		// advance: it should land on the profile AFTER the implicit
+		// getActiveProfileName() (which is "main"), so → "alt".
+		await pi.simulateShortcut(
+			"alt+i",
+			makeCtx(pi, {
+				cwd: "/home/user/project/src",
+				ui: { notify: () => {}, select: async () => "Block" },
+			}),
+		)
+		const last = pi.appendEntries[pi.appendEntries.length - 1]
+		expect((last.data as any).activeProfile).toBe("alt")
+	})
+
+	it("warns when no profiles exist in the config", async () => {
+		setupProfile({})
+		const notifs: string[] = []
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src", {
+			notify: (m: string) => notifs.push(m),
+			select: async () => "Block",
+		})
+		await pi.simulateShortcut(
+			"alt+i",
+			makeCtx(pi, {
+				cwd: "/home/user/project/src",
+				ui: {
+					notify: (m: string) => notifs.push(m),
+					select: async () => "Block",
+				},
+			}),
+		)
+		expect(notifs.some((n) => /no profiles/i.test(n))).toBe(true)
+	})
+
+	it("re-applies the model mapping for the current mode after cycling", async () => {
+		setupProfile({
+			active: "alpha",
+			alpha: { ask: "p/askA" },
+			beta: { ask: "p/askB" },
+		})
+		const fakeModels: Record<string, unknown> = {
+			askA: { id: "askA" },
+			askB: { id: "askB" },
+		}
+		const registry = {
+			find: (_provider: string, model: string) => fakeModels[model],
+		}
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src", undefined, registry)
+		// Force activation so the call to setActiveProfile re-resolves the model.
+		await pi.simulateShortcut(
+			"alt+i",
+			makeCtx(pi, {
+				cwd: "/home/user/project/src",
+				ui: { notify: () => {}, select: async () => "Block" },
+				modelRegistry: registry,
+			}),
+		)
+		// The last setModel call should be for askB (the new profile's mapping
+		// for the ask mode we start in).
+		const last = pi.setModelCalls[pi.setModelCalls.length - 1]
+		expect(last.model).toEqual({ id: "askB" })
+	})
+
+	it("notifies with the newly-activated profile name", async () => {
+		setupProfile({
+			active: "alpha",
+			alpha: { ask: "p/a" },
+			beta: { ask: "p/b" },
+		})
+		const notifs: string[] = []
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart("/home/user/project/src", {
+			notify: (m: string) => notifs.push(m),
+			select: async () => "Block",
+		})
+		await pi.simulateShortcut(
+			"alt+i",
+			makeCtx(pi, {
+				cwd: "/home/user/project/src",
+				ui: {
+					notify: (m: string) => notifs.push(m),
+					select: async () => "Block",
+				},
+			}),
+		)
+		expect(notifs.some((n) => /profile.*beta.*activated/i.test(n))).toBe(true)
 	})
 })
