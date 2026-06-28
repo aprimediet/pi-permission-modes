@@ -1,5 +1,8 @@
 # @aprimediet/permission-modes
 
+[![npm version](https://img.shields.io/npm/v/@aprimediet/permission-modes)](https://www.npmjs.com/package/@aprimediet/permission-modes)
+[![License](https://img.shields.io/npm/l/@aprimediet/permission-modes)](LICENSE)
+
 Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Three modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. The model is **not** changed per mode — only the approval behavior.
 
 ## Modes
@@ -57,13 +60,36 @@ pi -e ./extensions/permission-modes/index.ts
 
 Auto-discovery also works: drop this folder at `~/.pi/agent/extensions/permission-modes/` (global) or `.pi/extensions/permission-modes/` (project) and pi loads `index.ts` automatically.
 
+## Testing
+
+```bash
+npm test                # run all 64 tests (vitest)
+npm run test:watch      # watch mode for development
+```
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+
 ## Layout
 
 ```
-permission-modes/                       # @aprimediet/permission-modes
-├── package.json   # pi manifest: { "extensions": ["./index.ts"] }
-├── index.ts       # the extension (default-exported factory)
-└── utils.ts       # bash allowlist + Plan: extraction + [DONE:n] helpers
+permission-modes/             # @aprimediet/permission-modes
+├── package.json              # pi manifest + npm package metadata
+├── index.ts                  # main extension (default-exported factory)
+├── utils.ts                  # bash allowlist + Plan: + [DONE:n] helpers
+├── index.test.ts             # integration tests (vitest)
+├── utils.test.ts             # unit tests (vitest)
+├── vitest.config.ts          # vitest config
+├── CHANGELOG.md              # release history
+├── LICENSE                   # MIT
+├── .gitignore                # excludes node_modules, lockfile, .pi/
+└── docs/
+    ├── PRD.md                # product requirements
+    └── prompts/              # mode-specific prompt context
+        ├── ask-mode-prompts.md
+        ├── plan-mode-prompts.md
+        └── auto-mode-prompts.md
 ```
 
-Third-party deps: none. The five pi-core packages are peer dependencies (bundled by pi). The model is never switched — Claude Code keeps one model across all modes, and the footer only *displays* it.
+Third-party deps: none. Peer dependencies (bundled by pi): `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-tui`, `typebox`. The model is never switched — pi keeps one model across all modes, and the footer only *displays* it.

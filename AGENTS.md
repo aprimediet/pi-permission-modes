@@ -4,7 +4,7 @@ Guide for coding agents working in this repository. Product context (goals, user
 features, success metrics): see [docs/PRD.md](docs/PRD.md).
 
 ## Summary
-A pi extension that implements Claude-Code-style permission modes (ask / plan / auto) for the pi coding agent, replacing v1.x's 4-mode system (default/plan/accept-edits/auto). It intercepts tool calls, gates approvals per mode, injects mode-specific context, provides a custom footer + status pill, and guards reads outside cwd in ask mode.
+A pi extension that implements Claude-Code-style permission modes (ask / plan / auto) for the pi coding agent, published on npm as `@aprimediet/permission-modes@1.1.0`. It intercepts tool calls, gates approvals per mode, injects mode-specific context, provides a live footer + status pill, guards reads outside cwd in ask mode, and supports auto-mode follow-up bounded by `/auto-depth`.
 
 ## Tech Stack
 - **Language:** TypeScript (ESM — `"type": "module"`)
@@ -15,21 +15,32 @@ A pi extension that implements Claude-Code-style permission modes (ask / plan / 
 
 ## Project Structure
 ```
-permission-modes/
-├── package.json       # pi manifest: { "extensions": ["./index.ts"] }
-├── index.ts           # main extension — default-exported factory function
-├── utils.ts           # pure helpers: bash allowlist, Plan: extraction, [DONE:n] tracking
+permission-modes/             # @aprimediet/permission-modes
+├── package.json              # pi manifest + npm package metadata
+├── index.ts                  # main extension — default-exported factory function
+├── utils.ts                  # pure helpers: bash allowlist, Plan: extraction, [DONE:n] tracking
+├── index.test.ts             # integration tests (vitest)
+├── utils.test.ts             # unit tests for utils (vitest)
+├── vitest.config.ts          # vitest configuration
+├── CHANGELOG.md              # release history
+├── LICENSE                   # MIT
+├── .gitignore                # excludes node_modules, package-lock.json, .pi/ artifacts
 ├── docs/
-│   └── PRD.md         # product requirements (human audience)
-├── AGENTS.md          # this file
-├── CLAUDE.md          # thin pointer → AGENTS.md
+│   ├── PRD.md                # product requirements (human audience)
+│   ├── prompts/              # mode-specific prompt context
+│   │   ├── ask-mode-prompts.md
+│   │   ├── plan-mode-prompts.md
+│   │   └── auto-mode-prompts.md
+│   └── suggestions.md        # feature ideas for future versions
+├── AGENTS.md                 # this file
+├── CLAUDE.md                 # thin pointer → AGENTS.md
 └── .pi/
-    └── permission-modes-45ea0551.md  # pi project marker (safe to commit/delete)
+    └── permission-modes-45ea0551.md  # pi project marker (auto-generated)
 ```
 
 ## Commands
 
-This is a pi extension — it has no standalone build/run lifecycle. All commands below run *inside* pi after the extension is loaded.
+### Pi runtime (inside pi after extension loaded)
 
 | Action | Command |
 |---|---|
@@ -42,7 +53,14 @@ This is a pi extension — it has no standalone build/run lifecycle. All command
 | Hot-reload | `/reload` (after edits) |
 | Verify loaded | `pi list` |
 
-There is no test, lint, or build command currently. The extension is loaded and run directly by pi at runtime.
+### Standalone (npm scripts)
+
+| Action | Command |
+|---|---|
+| Run tests | `npm test` |
+| Watch tests | `npm run test:watch` |
+| Dry-run package | `npm run pack:dry` |
+| Publish | `npm publish` |
 
 ## Conventions
 - **Style:** TypeScript, ESM (`import`/`export`), no semicolons (standard pi extension style)
@@ -61,17 +79,21 @@ There is no test, lint, or build command currently. The extension is loaded and 
 - **Invariants:** The three-mode cycle (ask → plan → auto) is hard-coded in `MODE_CYCLE`; accept-edits was removed and default was renamed to ask in v2.0.0. The plan-mode tool restrictions (`PLAN_TOOLS`, `PLAN_DISABLED`) and bash safe/destructive patterns are in `utils.ts`. Change these with care.
 
 ## Known Issues & Gotchas
-- No test infrastructure yet — no test files, no vitest/jest config. Add tests before making non-trivial logic changes.
+- **Test infrastructure exists** — 64 tests across `index.test.ts` and `utils.test.ts` using vitest. Always run `npm test` before committing non-trivial changes.
 - The `--permission-mode` flag uses a distinct name because pi has a built-in `--mode` flag for output format (text/json/rpc). Do not rename it to `--mode`.
 - Auto mode follow-up logic is currently **commented out** in `index.ts` (the `turn_end` handler block). Re-enable when auto-continue support in pi is stable.
 - `typebox` is listed as a peer dep but not currently imported. It may be needed for future input validation.
 - No `.env` / `.env.example` — this extension has no environment secrets.
 - No `tsconfig.json` — pi bundles its own TypeScript configuration.
+- **Registry indexing lag:** `npm view` can return stale data for a few minutes after publish. Verify via direct GET to `https://registry.npmjs.org/@aprimediet/permission-modes/<version>`.
+- **No git tags yet:** tag the release on GitHub with `git tag v<version> && git push origin v<version>`.
 
 ## Companion Extensions
 - **minion (@aprimediet/minion):** Active (project `permission-modes-45ea0551`, 0 open tasks). Check the kanban board at `~/.pi/projects/permission-modes-45ea0551/tasks/` before starting work to see if any delegated tasks are pending.
-- **memory (@aprimediet/memory):** Active (1 entry). Durable facts are stored at `~/.pi/projects/permission-modes-45ea0551/memory/`. Use `memory_write` to save decisions/gotchas and `memory_search` to recall context.
+- **memory (@aprimediet/memory):** Active (8+ entries). Durable facts are stored at `~/.pi/projects/permission-modes-45ea0551/memory/`. Use `memory_write` to save decisions/gotchas and `memory_search` to recall context.
 
 ## Current Focus
-- **v2.0.0** — 3-mode redesign (ask/plan/auto), outside-cwd read guarding in ask mode, outside-cwd safety net in auto mode, project-root detection, vitest test suite, auto follow-up re-enabled, full 64-test coverage
-- Next: solicit user feedback; publish to npm
+- **v1.1.0** published on npm (`@aprimediet/permission-modes@1.1.0`)
+- 64 passing tests (vitest)
+- Next: solicit user feedback; re-enable auto follow-up when pi stabilizes; publish patches as needed
+- See [CHANGELOG.md](CHANGELOG.md) for full release history
