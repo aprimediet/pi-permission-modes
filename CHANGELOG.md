@@ -1,3 +1,36 @@
+## [1.1.3] - 2026-06-29
+
+### Added
+- **Auto-mode outside-cwd write tracking**: In auto mode, `edit`/`write` calls to paths outside the working directory are now auto-approved (previously prompted), but each one is snapshotted to `<cwd>/.pi/projects/<project-id>/tmp/outside-writes/` for potential rollback. Snapshots include the pre-write file content (or `null` if the file didn't exist).
+- **`/outside-writes` command**: Lists all tracked outside-cwd writes (read-only). Shows timestamp, tool, path, and what `/undo-outside-writes` would do (`would restore` vs `would delete`).
+- **`/undo-outside-writes` command**: Restores one or all tracked outside-cwd writes. Modes:
+  - no args — interactive selector (newest first)
+  - `all` — restore all without prompting
+  - `--list` (or `list`) — alias for `/outside-writes`
+  - Available in all modes (not auto-only).
+- **Snapshot cap at 100**: Long-running sessions auto-evict oldest snapshots (LRU) and notify via `ctx.ui.notify`.
+- **21 new unit tests** in `utils.test.ts` (project ID, hash, tmp dir, snapshot lifecycle).
+- **15 new integration tests** in `index.test.ts` (auto-mode tracking, undo commands, edge cases, external-modification warning).
+
+### Changed
+- **`index.ts`**: Auto-mode `tool_call` branch no longer prompts on edit/write outside cwd. Still prompts on bash destructive-outside-cwd (safety net unchanged). Tracks every outside-cwd write via `trackOutsideWrite()`. MODE_CONTEXT["auto"] updated to mention tracking. Added `formatSnapshotForDisplay()`, `isExternallyModified()`, `/outside-writes` command, and `/undo-outside-writes` command.
+- **`utils.ts`**: Added 8 new exports — `OutsideWriteSnapshot`, `getProjectId`, `hashPath`, `getProjectTmpDir`, `trackOutsideWrite`, `listTrackedOutsideWrites`, `restoreOutsideWrite`, `popTrackedOutsideWrite`. Added `readFileSync`, `createHash`, `mkdirSync`, `readdirSync`, `writeFileSync`, `unlinkSync` imports. Added `MAX_TRACKED_WRITES` constant.
+- **`docs/prompts/auto-mode-prompts.md`**: Updated auto-approve conditions, added write tracking section, updated decision tree.
+- **`docs/PRD.md`**: Added "Outside-Cwd Write Tracking" feature and commands table.
+- **`AGENTS.md`**: Updated summary, commands table, current focus, boundaries, known issues.
+- **`README.md`**: Updated modes table, commands table, added outside-cwd write tracking section, bumped test count.
+
+### Fixed
+- Auto mode previously prompted on outside-cwd writes — now auto-approves (more in line with auto-mode's hands-off philosophy) while keeping a rollback safety net via snapshots.
+
+### Notes
+- Total tests: **148 passing** (60 utils + 31 profiles + 54 index integration + 3 vitest config).
+- Ask/plan mode behavior unchanged.
+- Bash destructive-outside-cwd prompt unchanged (still prompts).
+- Snapshot dir creation failure is non-fatal: logs a warning, skips tracking, still auto-approves the write.
+
+[1.1.3]: https://github.com/aprimediet/pi-permission-modes/compare/v1.1.2...v1.1.3
+
 # Changelog
 
 ## [1.1.2] - 2026-06-28
