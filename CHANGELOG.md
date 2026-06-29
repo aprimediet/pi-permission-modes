@@ -1,3 +1,26 @@
+## [1.1.5] - 2026-06-29
+
+### Fixed
+- **CRITICAL: Skill filtering was a no-op.** The `filterSkillsFromPrompt()` regex in `utils.ts` matched the Agent Skills spec format `<skill name="...">` (with the skill name as an attribute), but pi's actual `formatSkillsForPrompt()` (in `@earendil-works/pi-coding-agent/dist/core/skills.js`) emits `<skill>\n  <name>...</name>\n  <description>...</description>\n  <location>...</location>\n</skill>` (name as a child element). The regex matched **zero** of the 21 real skill blocks in this very session's system prompt — `String.prototype.replace()` returns the prompt unchanged when there are no matches, so all skills leaked through regardless of the `model-profiles.json` allowlist. The 19 unit tests for `filterSkillsFromPrompt` in `utils.test.ts` all passed because they were constructed against the wrong format. Confirmed at runtime: 21 skills in system prompt with `plan.skills = ["brainstorming","using-superpowers","writing-plans"]` → expected 3, got 21.
+- **Regex updated** to match pi's actual schema: `<skill>\s*<name>([^<]+)<\/name>[\s\S]*?<\/skill>`. Same fast-paths (`["*"]`, `[]`, no `<skill>` in prompt) and same semantics — only the pattern matched against the skill blocks changed.
+- **Test fixtures rewritten** in `utils.test.ts` and `index.test.ts` to use pi's actual format. Added two new tests:
+  - `does NOT match the Agent Skills spec attribute format (regression guard)` — locks in that the v1.1.4 wrong format is NOT silently swallowed.
+  - `matches the EXACT output of pi's formatSkillsForPrompt (integration)` — uses a verbatim copy of the schema emitted by `@earendil-works/pi-coding-agent/dist/core/skills.js` so future pi format drift is caught immediately.
+
+### Added
+- **Defensive `console.warn`** in `index.ts:before_agent_start`: if the user has a non-empty, non-`["*"]` skill filter AND the system prompt contains `<skill>` blocks AND filtering returned the prompt unchanged, log a loud warning. This is the symptom of pi changing `formatSkillsForPrompt()` without us noticing — surfaced instead of silently regressing.
+
+### Changed
+- **`utils.ts`**: doc-comment for `filterSkillsFromPrompt` updated to describe pi's actual schema (with reference to `skills.js:formatSkillsForPrompt`) instead of the Agent Skills spec attribute format.
+- **`index.ts`**: `before_agent_start` now logs the defensive warning described above.
+
+### Notes
+- Total tests: **189 passing** (78 utils + 50 profiles + 61 index) — was 187 before v1.1.5.
+- Manual verification on the current session: with `~/.pi/agent/model-profiles.json` `default.plan.skills = ["brainstorming","using-superpowers","writing-plans"]`, the v1.1.5 regex correctly reduces 21 → 3 `<skill>` blocks.
+- This is a behavior-changing fix to a feature that was effectively missing in v1.1.4. Bumped to v1.1.5 (minor) rather than v1.1.4 patch.
+
+[1.1.5]: https://github.com/aprimediet/pi-permission-modes/compare/v1.1.4...v1.1.5
+
 ## [1.1.4] - 2026-06-29
 
 ### Added

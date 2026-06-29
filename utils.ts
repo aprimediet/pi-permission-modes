@@ -489,8 +489,22 @@ export function popTrackedOutsideWrite(
  * Remove skill XML blocks from the system prompt whose names are NOT in the
  * allowedSkills list.
  *
- * Skill blocks follow the Agent Skills spec format:
- *   <skill name="SKILL_NAME" description="...">...</skill>
+ * Skill blocks in the actual pi prompt follow this XML schema (see
+ * `@earendil-works/pi-coding-agent/dist/core/skills.js:formatSkillsForPrompt`):
+ *
+ *   <available_skills>
+ *     <skill>
+ *       <name>SKILL_NAME</name>
+ *       <description>...</description>
+ *       <location>...absolute path to SKILL.md...</location>
+ *     </skill>
+ *     ...
+ *   </available_skills>
+ *
+ * NOTE: This is NOT the Agent Skills spec's `<skill name="...">` attribute
+ * format. The v1.1.4 implementation used that wrong schema and silently let
+ * all skills through (regex matched zero of the real blocks). v1.1.5 fixed
+ * the regex to match the child `<name>` element.
  *
  * The function is a no-op (returns the prompt unchanged) when:
  *   - allowedSkills is ["*"] (allow all — default behavior)
@@ -520,11 +534,17 @@ export function filterSkillsFromPrompt(
 	// Fast-path: no skill blocks at all
 	if (!prompt.includes("<skill")) return prompt
 
-	// Remove <skill name="...">...</skill> blocks whose name is NOT in allowedSkills.
-	// The regex is greedy for the skill name, then lazy for content up to </skill>.
-	// Skills don't nest per the Agent Skills spec, so the first </skill> is correct.
+	// Remove `<skill>...</skill>` blocks whose child `<name>` element is NOT in
+	// allowedSkills. We deliberately allow flexible whitespace/indentation
+	// between `<skill>` and `<name>` because pi's `formatSkillsForPrompt` uses
+	// two-space indentation, but external callers might re-format.
+	//
+	// The capture group matches one line of `<name>...</name>` (no nested tags
+	// allowed inside the name — Agent Skills spec constrains names to
+	// [a-z0-9-]). `[\s\S]*?` is lazy so it stops at the FIRST `</skill>`,
+	// which is correct because skills don't nest.
 	return prompt.replace(
-		/<skill\s+name="([^"]+)"[^>]*>[\s\S]*?<\/skill>/g,
+		/<skill>\s*<name>([^<]+)<\/name>[\s\S]*?<\/skill>/g,
 		(match, name: string) => (allowedSkills.includes(name) ? match : ""),
 	)
 }

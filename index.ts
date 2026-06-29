@@ -930,7 +930,29 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       const systemPrompt =
         event?.systemPrompt ?? ctx?.getSystemPrompt?.() ?? "";
       if (systemPrompt) {
-        result.systemPrompt = filterSkillsFromPrompt(systemPrompt, skillFilter);
+        const filtered = filterSkillsFromPrompt(systemPrompt, skillFilter);
+        // Defensive guard (v1.1.5): if filtering was a no-op despite a
+        // non-empty, non-"*" allowlist (i.e. user explicitly named skills
+        // to keep), the regex probably drifted from pi's actual
+        // `formatSkillsForPrompt` schema. Surface this loudly so future
+        // regressions don't ship silently like v1.1.4 did.
+        //
+        // We only warn when skillFilter is non-empty: `[]` is the documented
+        // "allow all" sentinel and a legitimate no-op (see filterSkillsFromPrompt).
+        if (
+          skillFilter.length > 0 &&
+          filtered === systemPrompt &&
+          systemPrompt.includes("<skill")
+        ) {
+          console.warn(
+            `[permission-modes] Skill filter for mode "${currentMode}" was a no-op ` +
+              `(${skillFilter.length} skill(s) requested: ${skillFilter.join(", ")}). ` +
+              `The system prompt contains <skill> blocks but none matched the filter. ` +
+              `This usually means pi changed formatSkillsForPrompt() and our regex ` +
+              `needs updating.`,
+          );
+        }
+        result.systemPrompt = filtered;
       }
     }
 

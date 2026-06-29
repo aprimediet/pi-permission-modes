@@ -1208,13 +1208,26 @@ describe("skill filtering in before_agent_start", () => {
 	let realProjectRoot: string
 
 	function skillPrompt(skills: string[]): string {
+		// Use pi's actual `formatSkillsForPrompt` schema (see
+		// `@earendil-works/pi-coding-agent/dist/core/skills.js`). The v1.1.4
+		// tests used the wrong `<skill name="...">` attribute format and all
+		// passed while the feature was broken at runtime.
 		const blocks = skills.map(
 			(s) =>
-				`<skill name="${s}" description="${s}">\nContent for ${s}\n</skill>`,
+				[
+					"  <skill>",
+					`    <name>${s}</name>`,
+					`    <description>${s}</description>`,
+					`    <location>/home/user/.pi/agent/skills/${s}/SKILL.md</location>`,
+					"  </skill>",
+				].join("\n"),
 		)
 		return [
 			"You are a helpful assistant.",
+			"",
+			"<available_skills>",
 			...blocks,
+			"</available_skills>",
 			"",
 			"[ASK MODE ACTIVE]",
 			"## Available tools",
