@@ -3,11 +3,15 @@ import { mkdtempSync, writeFileSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { readdirSync, existsSync } from "node:fs";
 import {
 	commandTargetsOutsideCwd,
 	extractTodoItems,
 	findProjectRoot,
 	formatCount,
+	getProjectId,
+	getProjectTmpDir,
+	hashPath,
 	isCompletionSignal,
 	isInsideProject,
 	isOutsideCwd,
@@ -306,3 +310,87 @@ describe("formatCount", () => {
 		expect(formatCount(-100)).toBe("0");
 	});
 });
+describe("getProjectId", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "pm-pid-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("returns existing hash from .pi/permission-modes-*.md", () => {
+		mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+		writeFileSync(
+			join(tmpDir, ".pi", "permission-modes-45ea0551.md"),
+			"# project marker",
+		);
+		expect(getProjectId(tmpDir)).toBe("45ea0551");
+	});
+
+	it("falls back to cwd hash when no marker exists", () => {
+		const id = getProjectId(tmpDir);
+		expect(id).toMatch(/^[a-f0-9]{8}$/);
+		expect(id).toBe(getProjectId(tmpDir)); // deterministic
+	});
+
+	it("falls back when .pi/ exists but no permission-modes-*.md", () => {
+		mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+		writeFileSync(join(tmpDir, ".pi", "other.md"), "");
+		const id = getProjectId(tmpDir);
+		expect(id).toMatch(/^[a-f0-9]{8}$/);
+	});
+});
+
+describe("hashPath", () => {
+	it("returns deterministic 8-char hex hash", () => {
+		expect(hashPath("/etc/passwd")).toMatch(/^[a-f0-9]{8}$/);
+		expect(hashPath("/etc/passwd")).toBe(hashPath("/etc/passwd"));
+	});
+
+	it("returns different hashes for different paths", () => {
+		expect(hashPath("/etc/passwd")).not.toBe(hashPath("/etc/hosts"));
+	});
+
+	it("handles empty string", () => {
+		expect(hashPath("")).toMatch(/^[a-f0-9]{8}$/);
+	});
+});
+
+describe("getProjectTmpDir", () => {
+	let tmpDir: string;
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "pm-tmp-"));
+	});
+
+	afterEach(() => {
+		rmSync(tmpDir, { recursive: true, force: true });
+	});
+
+	it("creates .pi/projects/<id>/tmp/outside-writes/", () => {
+		const result = getProjectTmpDir(tmpDir);
+		expect(existsSync(result)).toBe(true);
+		expect(result).toContain(".pi/projects/");
+		expect(result).toContain("/tmp/outside-writes");
+		expect(result.startsWith(tmpDir)).toBe(true);
+	});
+
+	it("uses existing project hash when present", () => {
+		mkdirSync(join(tmpDir, ".pi"), { recursive: true });
+		writeFileSync(
+			join(tmpDir, ".pi", "permission-modes-deadbeef.md"),
+			"",
+		);
+		expect(getProjectTmpDir(tmpDir)).toContain("/deadbeef/");
+	});
+
+	it("is idempotent (second call returns same path)", () => {
+		const a = getProjectTmpDir(tmpDir);
+		const b = getProjectTmpDir(tmpDir);
+		expect(a).toBe(b);
+	});
+});
+

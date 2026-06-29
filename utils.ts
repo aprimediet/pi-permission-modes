@@ -10,8 +10,11 @@
  * Ported from pi's bundled `examples/extensions/plan-mode/utils.ts`.
  */
 
-import { existsSync } from "node:fs"
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs"
+import { createHash } from "node:crypto"
 import path from "node:path"
+
+const MAX_TRACKED_WRITES = 100
 
 // Commands that mutate state — never allowed in plan mode, and prompt elsewhere.
 const DESTRUCTIVE_PATTERNS: RegExp[] = [
@@ -266,6 +269,54 @@ export function findProjectRoot(cwd: string): string | null {
 		dir = path.dirname(dir);
 	}
 	return null;
+}
+
+/**
+ * Resolve the project's stable ID. Looks for the existing
+ * `.pi/permission-modes-<hash>.md` marker file (created by pi when the
+ * project was opened). Falls back to a hash of `cwd` if not found.
+ *
+ * The marker filename is the canonical source because pi creates it
+ * automatically and uses the same hash for kanban boards, memory, etc.
+ */
+export function getProjectId(cwd: string): string {
+	try {
+		const piDir = path.join(cwd, ".pi")
+		if (existsSync(piDir)) {
+			const entries = readdirSync(piDir)
+			const match = entries.find((e) =>
+				/^permission-modes-[a-f0-9]+\.md$/.test(e),
+			)
+			if (match) {
+				const id = match.replace(/^permission-modes-/, "").replace(/\.md$/, "")
+				return id
+			}
+		}
+	} catch {
+		/* ignore — fall through to hash fallback */
+	}
+	return hashPath(cwd)
+}
+
+/** First 8 hex chars of sha256(input). Deterministic. */
+export function hashPath(p: string): string {
+	return createHash("sha256").update(p).digest("hex").slice(0, 8)
+}
+
+/**
+ * Return the absolute path to the project's outside-writes snapshot dir,
+ * creating it (and all parents) if it doesn't exist.
+ *
+ * Layout: `<cwd>/.pi/projects/<projectId>/tmp/outside-writes/`
+ *
+ * Created lazily on first call so empty projects don't litter their tree.
+ * Safe to call repeatedly — idempotent.
+ */
+export function getProjectTmpDir(cwd: string): string {
+	const id = getProjectId(cwd)
+	const dir = path.join(cwd, ".pi", "projects", id, "tmp", "outside-writes")
+	mkdirSync(dir, { recursive: true })
+	return dir
 }
 
 /**
