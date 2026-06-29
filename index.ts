@@ -24,6 +24,7 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { readFileSync } from "node:fs"
 import { homedir } from "node:os";
 import {
   commandTargetsOutsideCwd,
@@ -34,7 +35,12 @@ import {
   isInsideProject,
   isOutsideCwd,
   isSafeCommand,
+  listTrackedOutsideWrites,
   markCompletedSteps,
+  popTrackedOutsideWrite,
+  restoreOutsideWrite,
+  trackOutsideWrite,
+  type OutsideWriteSnapshot,
   type TodoItem,
 } from "./utils.ts";
 import {
@@ -644,23 +650,47 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
       return undefined;
     }
 
-    // AUTO: approve everything, except prompt for edit/write/bash that target
-    // paths outside cwd that are also outside the detected project root.
-    // Reads are always auto-approved (read-only).
+    // AUTO: approve everything, except prompt for bash destructive outside cwd
+    // that targets paths outside the detected project root. Reads are always
+    // auto-approved (read-only). Edit/write outside cwd are auto-approved but
+    // tracked via trackOutsideWrite() so the user can roll back via
+    // /undo-outside-writes (NEW in v1.1.3).
     if (currentMode === "auto") {
       if (tool === "read" || tool === "grep" || tool === "find" || tool === "ls") {
         return undefined;
       }
-      const pathStr = String(input.path ?? "");
-      const cmdStr = tool === "bash" ? String(input.command ?? "") : "";
-      const outside =
-        (pathStr && isOutsideCwd(pathStr, ctx.cwd)) ||
-        (cmdStr && commandTargetsOutsideCwd(cmdStr, ctx.cwd));
-      if (outside && !isInsideProject(pathStr || ".", ctx.cwd, projectRoot)) {
-        const label = pathStr
-          ? `outside cwd on "${pathStr}"`
-          : `outside cwd on "${cmdStr}"`;
-        return promptApproval(ctx, tool, label);
+
+      // Edit/write: auto-approve; track outside-cwd writes for undo.
+      if (tool === "edit" || tool === "write") {
+        const pathStr = String(input.path ?? "");
+        if (pathStr && isOutsideCwd(pathStr, ctx.cwd)) {
+          let backupContent: string | null = null;
+          try {
+            backupContent = readFileSync(pathStr, "utf-8");
+          } catch {
+            backupContent = null;
+          }
+          trackOutsideWrite(ctx.cwd, {
+            timestamp: new Date().toISOString(),
+            originalPath: pathStr,
+            toolName: tool,
+            backupContent,
+          });
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              `📝 tracked outside-cwd ${tool}: ${shortenPath(pathStr)}`,
+              "info",
+            );
+          }
+        }
+        return undefined;
+      }
+
+      // Bash: destructive outside cwd still prompts (safety net unchanged).
+      const cmdStr = String(input.command ?? "");
+      const outside = cmdStr && commandTargetsOutsideCwd(cmdStr, ctx.cwd);
+      if (outside && !isInsideProject(".", ctx.cwd, projectRoot)) {
+        return promptApproval(ctx, tool, `outside cwd on "${cmdStr}"`);
       }
       return undefined;
     }

@@ -9,9 +9,17 @@
  */
 
 import { describe, expect, it, beforeEach, vi } from "vitest"
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 
 import permissionModesExtension from "./index.ts"
 import { setModelsPath } from "./profiles.ts"
+import {
+	listTrackedOutsideWrites,
+	type OutsideWriteSnapshot,
+} from "./utils.ts"
 
 // ---- minimal fake pi API ------------------------------------------------
 
@@ -955,3 +963,117 @@ describe("permission-modes extension: Alt+I cycle profile shortcut", () => {
 		expect(notifs.some((n) => /profile.*beta.*activated/i.test(n))).toBe(true)
 	})
 })
+describe("auto mode: outside-cwd write tracking", () => {
+	let pi: FakePi
+	let realProjectRoot: string
+	let outsideTmpDir: string
+	let outsideFile: string
+
+	async function switchMode(mode: string) {
+		pi.flags["permission-mode"] = mode
+		await pi.simulateSessionStart(realProjectRoot)
+	}
+
+	beforeEach(async () => {
+		pi = createFakePi()
+		// Use real fs: the current repo IS a project (has package.json).
+		realProjectRoot = process.cwd()
+		outsideTmpDir = mkdtempSync(join(tmpdir(), "pm-outside-"))
+		outsideFile = join(outsideTmpDir, "test.txt")
+		permissionModesExtension(makeFakePiForExtension(pi))
+		await pi.simulateSessionStart(realProjectRoot)
+	})
+
+	afterEach(() => {
+		// Clean up any .pi/ artifacts created in realProjectRoot
+		const tmpDir = join(realProjectRoot, ".pi", "projects")
+		if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
+		rmSync(outsideTmpDir, { recursive: true, force: true })
+	})
+
+	it("auto-approves write outside cwd (no prompt)", async () => {
+		await switchMode("auto")
+		const ctx = makeCtx(pi, { cwd: realProjectRoot })
+		const result = await pi.simulateToolCall("write", { path: outsideFile }, ctx)
+		expect(result).toBeUndefined()
+	})
+
+	it("captures backup content of existing file before writing", async () => {
+		writeFileSync(outsideFile, "ORIGINAL")
+		await switchMode("auto")
+		const ctx = makeCtx(pi, { cwd: realProjectRoot })
+		// Write tool_call happens BEFORE the tool actually runs in real pi;
+		// in our fake we just call the handler. So pre-write content is "ORIGINAL".
+		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
+		// Snapshot must exist
+		const snaps = listTrackedOutsideWrites(realProjectRoot)
+		expect(snaps).toHaveLength(1)
+		expect(snaps[0].originalPath).toBe(outsideFile)
+		expect(snaps[0].backupContent).toBe("ORIGINAL")
+		expect(snaps[0].toolName).toBe("write")
+	})
+
+	it("tracks null backup when file did not exist before write", async () => {
+		await switchMode("auto")
+		const ctx = makeCtx(pi, { cwd: realProjectRoot })
+		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
+		const snaps = listTrackedOutsideWrites(realProjectRoot)
+		expect(snaps[0].backupContent).toBeNull()
+	})
+
+	it("stacks snapshots when same path is written twice", async () => {
+		writeFileSync(outsideFile, "FIRST_ORIGINAL")
+		await switchMode("auto")
+		const ctx = makeCtx(pi, { cwd: realProjectRoot })
+		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
+		// The snapshot captures pre-write content
+		const snap1 = listTrackedOutsideWrites(realProjectRoot)[0]
+		expect(snap1.backupContent).toBe("FIRST_ORIGINAL")
+
+		// Second write — snapshot captures whatever the file had before this write.
+		// In the fake, file content is unchanged from after the first call
+		// (since we didn't actually write anything). So the new backup matches.
+		await new Promise((r) => setTimeout(r, 5))
+		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
+		const snaps = listTrackedOutsideWrites(realProjectRoot)
+		expect(snaps).toHaveLength(2)
+		expect(snaps[0].timestamp).not.toBe(snaps[1].timestamp)
+	})
+
+	it("does NOT track writes inside cwd", async () => {
+		await switchMode("auto")
+		const ctx = makeCtx(pi, { cwd: realProjectRoot })
+		await pi.simulateToolCall("write", { path: "src/foo.ts" }, ctx)
+		expect(listTrackedOutsideWrites(realProjectRoot)).toEqual([])
+	})
+
+	it("notifies user when write is tracked", async () => {
+		const notifications: string[] = []
+		await switchMode("auto")
+		const ctx = makeCtx(pi, {
+			cwd: realProjectRoot,
+			ui: { notify: (m: string) => notifications.push(m), select: async () => "Block" },
+		})
+		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
+		expect(notifications.some((n) => n.includes("tracked"))).toBe(true)
+	})
+
+	it("does NOT prompt on outside-cwd write even with strict UI", async () => {
+		await switchMode("auto")
+		let prompted = false
+		const ctx = makeCtx(pi, {
+			cwd: realProjectRoot,
+			ui: {
+				select: async () => {
+					prompted = true
+					return "Block"
+				},
+				notify: () => {},
+			},
+		})
+		const result = await pi.simulateToolCall("write", { path: outsideFile }, ctx)
+		expect(prompted).toBe(false)
+		expect(result).toBeUndefined()
+	})
+})
+
