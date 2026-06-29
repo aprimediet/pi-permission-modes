@@ -1077,3 +1077,126 @@ describe("auto mode: outside-cwd write tracking", () => {
 	})
 })
 
+
+describe("/outside-writes and /undo-outside-writes commands", () => {
+	let pi: FakePi
+	let cwd: string
+	let outsideDir: string
+	let outsideFile: string
+
+	beforeEach(() => {
+		pi = createFakePi()
+		cwd = mkdtempSync(join(tmpdir(), "pm-cmd-"))
+		outsideDir = mkdtempSync(join(tmpdir(), "pm-cmd-out-"))
+		outsideFile = join(outsideDir, "outside-target.txt")
+		permissionModesExtension(makeFakePiForExtension(pi))
+	})
+
+	afterEach(() => {
+		rmSync(cwd, { recursive: true, force: true })
+		rmSync(outsideDir, { recursive: true, force: true })
+	})
+
+	async function setupTrackedWrites() {
+		writeFileSync(outsideFile, "ORIGINAL")
+		await pi.simulateSessionStart(cwd)
+		pi.flags["permission-mode"] = "auto"
+		await pi.simulateSessionStart(cwd)
+
+		// Simulate two tracked writes
+		const ctx1 = makeCtx(pi, { cwd })
+		await pi.simulateToolCall("write", { path: outsideFile }, ctx1)
+		await new Promise((r) => setTimeout(r, 5))
+		const ctx2 = makeCtx(pi, { cwd })
+		await pi.simulateToolCall("edit", { path: outsideFile }, ctx2)
+	}
+
+	it("/outside-writes displays tracked snapshots via sendMessage", async () => {
+		await setupTrackedWrites()
+		await pi.simulateCommand("outside-writes", "", makeCtx(pi, { cwd }))
+		const lastMsg = pi.sentMessages[pi.sentMessages.length - 1]
+		expect(lastMsg.message.customType).toBe("outside-writes-list")
+		expect(String(lastMsg.message.content)).toContain(outsideFile)
+		expect(String(lastMsg.message.content)).toContain("would restore")
+	})
+
+	it("/undo-outside-writes --list behaves like /outside-writes", async () => {
+		await setupTrackedWrites()
+		await pi.simulateCommand("undo-outside-writes", "--list", makeCtx(pi, { cwd }))
+		expect(pi.sentMessages.some((m) =>
+			m.message.customType === "outside-writes-list"
+		)).toBe(true)
+	})
+
+	it("/undo-outside-writes list alias also works", async () => {
+		await setupTrackedWrites()
+		await pi.simulateCommand("undo-outside-writes", "list", makeCtx(pi, { cwd }))
+		expect(pi.sentMessages.some((m) =>
+			m.message.customType === "outside-writes-list"
+		)).toBe(true)
+	})
+
+	it("/undo-outside-writes all restores everything and pops all snapshots", async () => {
+		await setupTrackedWrites()
+		// Simulate that the tool actually wrote something
+		writeFileSync(outsideFile, "NEW_CONTENT")
+		await pi.simulateCommand("undo-outside-writes", "all", makeCtx(pi, { cwd }))
+		// File restored
+		expect(readFileSync(outsideFile, "utf-8")).toBe("ORIGINAL")
+		// Snapshots popped
+		expect(listTrackedOutsideWrites(cwd)).toEqual([])
+	})
+
+	it("/undo-outside-writes (no args) shows selector and restores selected", async () => {
+		await setupTrackedWrites()
+		writeFileSync(outsideFile, "NEW_CONTENT")
+		let selectorOptions: string[] = []
+		const ctx = makeCtx(pi, {
+			cwd,
+			ui: {
+				select: async (_label: string, options: string[]) => {
+					selectorOptions = options
+					return options[0]!
+				},
+				notify: () => {},
+			},
+		})
+		await pi.simulateCommand("undo-outside-writes", "", ctx)
+		expect(selectorOptions.length).toBeGreaterThan(0)
+		expect(readFileSync(outsideFile, "utf-8")).toBe("ORIGINAL")
+	})
+
+	it("/undo-outside-writes handles empty snapshot list gracefully", async () => {
+		await pi.simulateSessionStart(cwd)
+		const notifications: string[] = []
+		await pi.simulateCommand("undo-outside-writes", "all", makeCtx(pi, {
+			cwd,
+			ui: { notify: (m: string) => notifications.push(m), select: async () => "Block" },
+		}))
+		expect(notifications.some((n) => n.includes("No tracked"))).toBe(true)
+	})
+
+	it("/undo-outside-writes deletes file when backupContent was null", async () => {
+		await pi.simulateSessionStart(cwd)
+		pi.flags["permission-mode"] = "auto"
+		await pi.simulateSessionStart(cwd)
+		// File didn't exist before write
+		await pi.simulateToolCall("write", { path: outsideFile }, makeCtx(pi, { cwd }))
+		// Simulate tool creating the file
+		writeFileSync(outsideFile, "NEWLY_CREATED")
+		await pi.simulateCommand("undo-outside-writes", "all", makeCtx(pi, { cwd }))
+		expect(existsSync(outsideFile)).toBe(false)
+	})
+
+	it("/outside-writes is available in ask mode too", async () => {
+		// Verify the command runs without mode restriction (even in ask mode).
+		// Set up in auto mode, then switch to ask
+		pi.flags["permission-mode"] = "ask"
+		await pi.simulateSessionStart(cwd)
+		// In ask mode, outside-writes should not throw
+		await expect(
+			pi.simulateCommand("outside-writes", "", makeCtx(pi, { cwd }))
+		).resolves.not.toThrow()
+	})
+})
+
