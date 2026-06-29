@@ -29,6 +29,7 @@ import { homedir } from "node:os";
 import {
   commandTargetsOutsideCwd,
   extractTodoItems,
+  filterSkillsFromPrompt,
   findProjectRoot,
   formatCount,
   isCompletionSignal,
@@ -51,6 +52,7 @@ import {
   parseModelId,
   profileExists,
   resolveModelForMode,
+  resolveSkillFilter,
   type ModelProfile,
   type ModelProfilesConfig,
 } from "./profiles.ts";
@@ -886,7 +888,7 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
   });
 
   // ---- context injection + dedup ----------------------------------------
-  pi.on("before_agent_start", async () => {
+  pi.on("before_agent_start", async (event, ctx) => {
     if (planExecuting && planTodos.length) {
       const remaining = planTodos
         .filter((t) => !t.completed)
@@ -900,12 +902,39 @@ export default function permissionModesExtension(pi: ExtensionAPI): void {
         },
       };
     }
+
+    const result: {
+      message?: { customType: string; content: string; display: boolean }
+      systemPrompt?: string
+    } = {};
+
+    // Inject mode context
     const content = MODE_CONTEXT[currentMode];
-    if (content)
-      return {
-        message: { customType: "modes-context", content, display: false },
+    if (content) {
+      result.message = {
+        customType: "modes-context",
+        content,
+        display: false,
       };
-    return undefined;
+    }
+
+    // Filter skills from the system prompt when a mode-specific filter is
+    // active. resolveSkillFilter returns ["*"] (allow all) when no filter is
+    // configured, in which case filterSkillsFromPrompt is a no-op.
+    const skillFilter = resolveSkillFilter(modelProfileConfig, currentMode);
+    if (skillFilter.length !== 1 || skillFilter[0] !== "*") {
+      // We have a specific skill filter — modify the system prompt.
+      // event.systemPrompt is the rendered prompt; ctx.getSystemPrompt() returns
+      // the current system prompt (which may have been modified by an earlier
+      // extension). Prefer the event value for the first-pass read.
+      const systemPrompt =
+        event?.systemPrompt ?? ctx?.getSystemPrompt?.() ?? "";
+      if (systemPrompt) {
+        result.systemPrompt = filterSkillsFromPrompt(systemPrompt, skillFilter);
+      }
+    }
+
+    return Object.keys(result).length > 0 ? result : undefined;
   });
 
   pi.on("context", async (event) => {

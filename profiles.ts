@@ -17,11 +17,25 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
-/** One named profile mapping modes to model IDs. */
+/** Per-mode configuration object with optional model, skill, and tool filters. */
+export interface ModeConfig {
+	model?: string
+	/** Skill name allowlist. ["*"] = all loaded skills. A specific list = only those. */
+	skills?: string[]
+	/** Tool name allowlist. ["*"] = all active tools. A specific list = only those. */
+	tools?: string[]
+}
+
+/**
+ * One named profile mapping modes to model IDs and/or ModeConfig objects.
+ *
+ * Backward compat: a bare string `"provider/model:thinking"` is shorthand for
+ * `{ model: "provider/model:thinking", skills: ["*"], tools: ["*"] }`.
+ */
 export interface ModelProfile {
-	ask?: string
-	plan?: string
-	auto?: string
+	ask?: string | ModeConfig
+	plan?: string | ModeConfig
+	auto?: string | ModeConfig
 }
 
 /** Full config file shape: an `active` pointer plus any number of named profiles. */
@@ -184,6 +198,95 @@ export function listProfiles(config: ModelProfilesConfig): string[] {
 	return Object.keys(config).filter(
 		(k) => k !== "active" && typeof config[k] === "object",
 	)
+}
+
+/**
+ * Normalize a raw profile mode entry (string or ModeConfig) into a canonical
+ * ModeConfig object. Returns a default ModeConfig (skills:["*"], tools:["*"])
+ * when entry is undefined.
+ */
+function normalizeModeEntry(
+	entry: string | ModeConfig | undefined,
+): ModeConfig {
+	if (entry === undefined) return { skills: ["*"], tools: ["*"] }
+	if (typeof entry === "string") return { model: entry, skills: ["*"], tools: ["*"] }
+	return {
+		model: entry.model,
+		skills: entry.skills ?? ["*"],
+		tools: entry.tools ?? ["*"],
+	}
+}
+
+/**
+ * Resolve the effective ModeConfig for a given mode from the active profile,
+ * falling back through defaults.
+ *
+ * Resolution order:
+ *   1. Active profile's mode entry (normalized to ModeConfig)
+ *   2. "default" profile's mode entry (normalized to ModeConfig)
+ *   3. Hardcoded fallback: { skills: ["*"], tools: ["*"] }
+ *
+ * Never returns undefined — always returns at least the hardcoded fallback.
+ */
+export function resolveModeConfig(
+	config: ModelProfilesConfig,
+	mode: "ask" | "plan" | "auto",
+): ModeConfig {
+	const profileName = config.active || "default"
+
+	// Try active profile
+	const profile = config[profileName] as ModelProfile | undefined
+	if (profile) {
+		const entry = profile[mode]
+		if (entry !== undefined) return normalizeModeEntry(entry)
+	}
+
+	// Fall back to "default" profile
+	if (profileName !== "default") {
+		const def = config["default"] as ModelProfile | undefined
+		if (def) {
+			const entry = def[mode]
+			if (entry !== undefined) return normalizeModeEntry(entry)
+		}
+	}
+
+	// Hardcoded fallback
+	return { skills: ["*"], tools: ["*"] }
+}
+
+/**
+ * Resolve the effective skill allowlist for a mode.
+ * Returns ["*"] when no filter is configured (allow all).
+ */
+export function resolveSkillFilter(
+	config: ModelProfilesConfig,
+	mode: "ask" | "plan" | "auto",
+): string[] {
+	return resolveModeConfig(config, mode).skills ?? ["*"]
+}
+
+/**
+ * Resolve the effective tool allowlist for a mode.
+ * Returns "*" when no filter is configured (allow all tools).
+ *
+ * Invariants (v1.1.4 stub — full implementation in v1.1.5):
+ *   - `read` is always mandatory in ALL modes
+ *   - Plan mode: `edit` and `write` are always excluded
+ *
+ * NOTE: This is a STUB for v1.1.4 — the full re-write of
+ * `applyToolRestrictions()` happens in v1.1.5. The stub returns the raw
+ * filter from config with `read` re-injected. Plan-mode disabled set
+ * enforcement is deferred to v1.1.5.
+ */
+export function resolveToolFilter(
+	config: ModelProfilesConfig,
+	mode: "ask" | "plan" | "auto",
+): string[] | "*" {
+	const mc = resolveModeConfig(config, mode)
+	const raw = mc.tools ?? ["*"]
+	if (raw.length === 1 && raw[0] === "*") return "*"
+	// Ensure read is always present
+	return [...new Set([...raw, "read"])]
 }
 
 /**

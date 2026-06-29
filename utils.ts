@@ -485,3 +485,47 @@ export function popTrackedOutsideWrite(
 	}
 }
 
+/**
+ * Remove skill XML blocks from the system prompt whose names are NOT in the
+ * allowedSkills list.
+ *
+ * Skill blocks follow the Agent Skills spec format:
+ *   <skill name="SKILL_NAME" description="...">...</skill>
+ *
+ * The function is a no-op (returns the prompt unchanged) when:
+ *   - allowedSkills is ["*"] (allow all — default behavior)
+ *   - allowedSkills is empty (filter nothing — same as "*")
+ *   - No skill blocks are found in the prompt text
+ *
+ * Skill names are constrained to [a-z0-9-] per the Agent Skills spec, so
+ * no regex escaping is needed.
+ *
+ * @param prompt         Full system prompt text
+ * @param allowedSkills  Array of skill names to keep, or ["*"] for all
+ * @returns Modified prompt with disallowed skill blocks removed
+ */
+export function filterSkillsFromPrompt(
+	prompt: string,
+	allowedSkills: string[],
+): string {
+	// Fast-path: allow all
+	if (
+		!allowedSkills ||
+		allowedSkills.length === 0 ||
+		(allowedSkills.length === 1 && allowedSkills[0] === "*")
+	) {
+		return prompt
+	}
+
+	// Fast-path: no skill blocks at all
+	if (!prompt.includes("<skill")) return prompt
+
+	// Remove <skill name="...">...</skill> blocks whose name is NOT in allowedSkills.
+	// The regex is greedy for the skill name, then lazy for content up to </skill>.
+	// Skills don't nest per the Agent Skills spec, so the first </skill> is correct.
+	return prompt.replace(
+		/<skill\s+name="([^"]+)"[^>]*>[\s\S]*?<\/skill>/g,
+		(match, name: string) => (allowedSkills.includes(name) ? match : ""),
+	)
+}
+

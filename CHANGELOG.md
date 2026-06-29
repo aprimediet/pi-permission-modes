@@ -1,3 +1,26 @@
+## [1.1.4] - 2026-06-29
+
+### Added
+- **Per-mode skill filtering**: Extend `~/.pi/agent/model-profiles.json` so each mode within a profile can specify a `skills` allowlist (e.g., `"skills": ["brainstorming", "writing-plans"]`). Skills not in the list are stripped from the system prompt via `before_agent_start`, saving tokens and keeping the agent focused on mode-relevant workflows.
+- **`ModeConfig` type**: Profiles can now use either a string (backward compatible) or a configuration object: `{ "model": "...", "skills": [...], "tools": [...] }`.
+- **`resolveModeConfig()`, `resolveSkillFilter()`, `resolveToolFilter()`** in `profiles.ts` — helpers to resolve the effective configuration for a mode, with fallback from active profile → default profile → hardcoded defaults.
+- **`filterSkillsFromPrompt()`** in `utils.ts` — pure function that strips disallowed `<skill>` XML blocks from the system prompt using the Agent Skills spec format.
+- **39 new tests**: 19 unit tests for config resolution, 13 unit tests for skill filtering, 7 integration tests for `before_agent_start` skill filtering.
+
+### Changed
+- **`profiles.ts`**: `ModelProfile` now accepts `string | ModeConfig` for each mode key. Added `ModeConfig` interface, `resolveModeConfig()`, `resolveSkillFilter()`, `resolveToolFilter()`, and internal `normalizeModeEntry()`.
+- **`utils.ts`**: Added `filterSkillsFromPrompt()` export.
+- **`index.ts`**: `before_agent_start` handler now receives `(event, ctx)`, reads the current `event.systemPrompt`, applies `filterSkillsFromPrompt()` when a non-`["*"]` skill filter is active, and returns the modified system prompt alongside the mode-context message.
+- **Backward compatibility**: Existing string-only configs parse identically. No migration needed.
+
+### Notes
+- Total tests: **187 passing** (76 utils + 50 profiles + 61 index).
+- Tool filtering is a **stub** in `resolveToolFilter()` (injects `read` as mandatory) — full implementation in v1.1.5.
+- Skill filtering only affects system prompt injection; skills can still be invoked via `/skill:name` if needed.
+- Skill filtering is config-file-only; no CLI flags for skill/tool filtering.
+
+[1.1.4]: https://github.com/aprimediet/pi-permission-modes/compare/v1.1.3...v1.1.4
+
 ## [1.1.3] - 2026-06-29
 
 ### Added

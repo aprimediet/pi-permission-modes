@@ -1200,3 +1200,189 @@ describe("/outside-writes and /undo-outside-writes commands", () => {
 	})
 })
 
+// ---- Skill filtering in before_agent_start -----------------------------
+
+describe("skill filtering in before_agent_start", () => {
+	let tmpDir: string
+	let pi: FakePi
+	let realProjectRoot: string
+
+	function skillPrompt(skills: string[]): string {
+		const blocks = skills.map(
+			(s) =>
+				`<skill name="${s}" description="${s}">\nContent for ${s}\n</skill>`,
+		)
+		return [
+			"You are a helpful assistant.",
+			...blocks,
+			"",
+			"[ASK MODE ACTIVE]",
+			"## Available tools",
+		].join("\n")
+	}
+
+	async function triggerBeforeAgentStart(
+		prompt: string,
+		mode: string,
+	): Promise<{ message?: unknown; systemPrompt?: string } | undefined> {
+		pi.flags["permission-mode"] = mode
+		await pi.simulateSessionStart(realProjectRoot)
+		const handlers = pi.handlers.get("before_agent_start") ?? []
+		if (handlers.length === 0) return undefined
+		const event = {
+			type: "before_agent_start" as const,
+			prompt: "user",
+			systemPrompt: prompt,
+			systemPromptOptions: { cwd: realProjectRoot },
+		}
+		const ctx = makeCtx(pi, { cwd: realProjectRoot })
+		const result = await handlers[0]!(event, ctx)
+		return result as { message?: unknown; systemPrompt?: string } | undefined
+	}
+
+	beforeEach(() => {
+		tmpDir = mkdtempSync(join(tmpdir(), "pm-skf-"))
+		pi = createFakePi()
+		realProjectRoot = process.cwd()
+		// Re-point the model-profiles config at a tmpfile so each test starts
+		// from a known empty (or custom) config.
+		setModelsPath(join(tmpDir, "model-profiles.json"))
+	})
+
+	afterEach(() => {
+		// Clean up any .pi/ artifacts created in realProjectRoot
+		const projectTmp = join(realProjectRoot, ".pi", "projects")
+		if (existsSync(projectTmp)) rmSync(projectTmp, { recursive: true, force: true })
+		rmSync(tmpDir, { recursive: true, force: true })
+		// Restore default models path so other test files are unaffected
+		setModelsPath(join(realProjectRoot, "model-profiles.json"))
+	})
+
+	it("does not filter skills when no filter is configured", async () => {
+		permissionModesExtension(makeFakePiForExtension(pi))
+		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
+		const result = await triggerBeforeAgentStart(prompt, "ask")
+		// systemPrompt should be unchanged
+		expect(result?.systemPrompt).toBeUndefined()
+	})
+
+	it("filters skills when a mode-specific skill filter is active", async () => {
+		writeFileSync(
+			join(tmpDir, "model-profiles.json"),
+			JSON.stringify({
+				active: "default",
+				default: {
+					plan: {
+						skills: ["brainstorming"],
+					},
+				},
+			}),
+		)
+		permissionModesExtension(makeFakePiForExtension(pi))
+		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
+		const result = await triggerBeforeAgentStart(prompt, "plan")
+		expect(result?.systemPrompt).toBeDefined()
+		expect(result!.systemPrompt).toContain("brainstorming")
+		expect(result!.systemPrompt).not.toContain("systematic-debugging")
+	})
+
+	it("does not filter when config has no skill filter for the active mode", async () => {
+		writeFileSync(
+			join(tmpDir, "model-profiles.json"),
+			JSON.stringify({
+				active: "default",
+				default: {
+					plan: { model: "" }, // model only, no skills filter
+				},
+			}),
+		)
+		permissionModesExtension(makeFakePiForExtension(pi))
+		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
+		const result = await triggerBeforeAgentStart(prompt, "plan")
+		// No skills filter defined → no systemPrompt change
+		expect(result?.systemPrompt).toBeUndefined()
+	})
+
+	it("preserves mode-context message along with skill-filtered system prompt", async () => {
+		writeFileSync(
+			join(tmpDir, "model-profiles.json"),
+			JSON.stringify({
+				active: "default",
+				default: {
+					plan: {
+						skills: ["brainstorming"],
+					},
+				},
+			}),
+		)
+		permissionModesExtension(makeFakePiForExtension(pi))
+		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
+		const result = await triggerBeforeAgentStart(prompt, "plan")
+		// Both message and systemPrompt should be present
+		expect(result?.message).toBeDefined()
+		expect((result?.message as { customType: string }).customType).toBe(
+			"modes-context",
+		)
+		expect(result?.systemPrompt).toContain("brainstorming")
+		expect(result?.systemPrompt).not.toContain("systematic-debugging")
+	})
+
+	it("handles empty skill filter (interpreted as no filter — allow all)", async () => {
+		// Per the v1.1.4 spec: an empty `skills` list is a no-op (treated like
+		// ["*"]) by filterSkillsFromPrompt. The user effectively said "no
+		// filter" — same as the default behavior.
+		writeFileSync(
+			join(tmpDir, "model-profiles.json"),
+			JSON.stringify({
+				default: {
+					plan: { skills: [] },
+				},
+			}),
+		)
+		permissionModesExtension(makeFakePiForExtension(pi))
+		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
+		const result = await triggerBeforeAgentStart(prompt, "plan")
+		// systemPrompt should contain the original skills (filter is a no-op)
+		expect(result?.systemPrompt).toBeDefined()
+		expect(result!.systemPrompt).toContain("brainstorming")
+		expect(result!.systemPrompt).toContain("systematic-debugging")
+	})
+
+	it("filters skills only for the mode the filter is configured on", async () => {
+		writeFileSync(
+			join(tmpDir, "model-profiles.json"),
+			JSON.stringify({
+				active: "default",
+				default: {
+					plan: { skills: ["brainstorming"] },
+				},
+			}),
+		)
+		permissionModesExtension(makeFakePiForExtension(pi))
+		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
+		const askResult = await triggerBeforeAgentStart(prompt, "ask")
+		// ask mode has no filter → no systemPrompt change
+		expect(askResult?.systemPrompt).toBeUndefined()
+	})
+
+	it("applies skill filter from active profile (not default profile)", async () => {
+		writeFileSync(
+			join(tmpDir, "model-profiles.json"),
+			JSON.stringify({
+				active: "custom",
+				custom: {
+					plan: { skills: ["brainstorming"] },
+				},
+				default: {
+					plan: { skills: ["writing-plans"] },
+				},
+			}),
+		)
+		permissionModesExtension(makeFakePiForExtension(pi))
+		const prompt = skillPrompt(["brainstorming", "writing-plans", "systematic-debugging"])
+		const result = await triggerBeforeAgentStart(prompt, "plan")
+		expect(result?.systemPrompt).toContain("brainstorming")
+		expect(result?.systemPrompt).not.toContain("writing-plans")
+		expect(result?.systemPrompt).not.toContain("systematic-debugging")
+	})
+})

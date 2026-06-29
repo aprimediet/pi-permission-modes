@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@aprimediet/permission-modes)](https://www.npmjs.com/package/@aprimediet/permission-modes)
 [![License](https://img.shields.io/npm/l/@aprimediet/permission-modes)](LICENSE)
 
-Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Three modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. v1.1.1 adds **per-mode model profiles**. v1.1.3 adds **outside-cwd write tracking** with `/undo-outside-writes`. — when you switch modes, the model can switch with you.
+Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Three modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. v1.1.1 adds **per-mode model profiles**. v1.1.3 adds **outside-cwd write tracking** with `/undo-outside-writes`. v1.1.4 adds **per-mode skill filtering** — keep your system prompt lean and focused on the current mode.
 
 ## Modes
 
@@ -72,6 +72,31 @@ In **auto mode**, `edit` and `write` calls to paths outside the working director
 - `/outside-writes` — same as `--list`
 
 Snapshots capture the file's pre-write content (or `null` if the file didn't exist). They persist across sessions until you undo them. The snapshot cap is 100 entries (oldest are evicted; you get a notification).
+
+### Per-mode skill filtering (v1.1.4)
+
+When you're in **plan mode**, skills like `systematic-debugging` and `executing-plans` are irrelevant noise. Skill filtering lets you configure which skills get injected into the system prompt per mode — saving tokens and keeping the agent focused.
+
+```json
+{
+  "active": "default",
+  "default": {
+    "ask": "anthropic/claude-sonnet-4-5",
+    "plan": {
+      "model": "anthropic/claude-sonnet-4-5",
+      "skills": ["brainstorming", "writing-plans"]
+    },
+    "auto": "openai/gpt-4o"
+  }
+}
+```
+
+- `"skills": ["brainstorming", "writing-plans"]` — only these two skills appear in the system prompt when in plan mode.
+- `"skills": ["*"]` or omitting `skills` entirely — allow all skills (default, no filtering).
+- String shorthand (`"anthropic/claude-sonnet-4-5"`) still works — backward compatible.
+- Skills can still be invoked manually via `/skill:name` if needed — filtering only controls which skills are pre-loaded into the agent's context.
+
+**Resolution order:** Active profile → default profile → hardcoded defaults (`["*"]`). The `read` tool is always mandatory in tool filters (stub for v1.1.5).
 
 ### Plan mode flow
 

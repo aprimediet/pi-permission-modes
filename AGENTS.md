@@ -4,7 +4,7 @@ Guide for coding agents working in this repository. Product context (goals, user
 features, success metrics): see [docs/PRD.md](docs/PRD.md).
 
 ## Summary
-A pi extension that implements Claude-Code-style permission modes (ask / plan / auto) for the pi coding agent, published on npm as `@aprimediet/permission-modes@1.1.3`. It intercepts tool calls, gates approvals per mode, injects mode-specific context, provides a live footer + status pill, guards reads outside cwd in ask mode, supports auto-mode follow-up bounded by `/auto-depth`, and (v1.1.1+) auto-switches the model per mode when the user has defined profiles in `~/.pi/agent/model-profiles.json`. v1.1.2 adds an `Alt+I` shortcut to cycle through profiles. v1.1.3 adds auto-mode outside-cwd write tracking with `/outside-writes` and `/undo-outside-writes` commands.
+A pi extension that implements Claude-Code-style permission modes (ask / plan / auto) for the pi coding agent, published on npm as `@aprimediet/permission-modes@1.1.4`. It intercepts tool calls, gates approvals per mode, injects mode-specific context, provides a live footer + status pill, guards reads outside cwd in ask mode, supports auto-mode follow-up bounded by `/auto-depth`, auto-switches the model per mode when the user has defined profiles in `~/.pi/agent/model-profiles.json`, tracks outside-cwd writes for undo (v1.1.3+), and (v1.1.4+) supports per-mode skill filtering to keep the system prompt lean and mode-relevant.
 
 ## Tech Stack
 - **Language:** TypeScript (ESM — `"type": "module"`)
@@ -82,12 +82,14 @@ permission-modes/             # @aprimediet/permission-modes
 - **Do NOT** change pi's core behavior — only intercept tool calls via `pi.on("tool_call", ...)` and return `{ block: true, reason }` or `undefined`
 - **Do NOT** modify the model outside an explicit user-defined profile — `pi.setModel()` is only called when the user has opted in via `~/.pi/agent/model-profiles.json` (i.e. `activeProfile !== undefined`). When no profile is active, the extension works exactly as v1.1.0.
 - **Do NOT** block auto-mode edit/write outside cwd — the v1.1.3 design auto-approves them and tracks snapshots for undo. The destructive-bash-outside-cwd prompt is the only auto-mode prompt that remains.
+- **Do NOT** filter skills via skill discovery or resource events — use `filterSkillsFromPrompt()` in `before_agent_start` to strip disallowed skill XML blocks from the system prompt string.
+- **Do NOT** implement tool filtering in v1.1.4 — `resolveToolFilter()` is a stub that only ensures `read` is mandatory. Full tool configurable filtering is v1.1.5.
 - **Do NOT** duplicate content between AGENTS.md and CLAUDE.md — keep AGENTS.md as the single source of truth
 - **Safe to delete:** `.pi/permission-modes-45ea0551.md` (recreated automatically)
 - **Invariants:** The three-mode cycle (ask → plan → auto) is hard-coded in `MODE_CYCLE`; accept-edits was removed and default was renamed to ask in v2.0.0. The plan-mode tool restrictions (`PLAN_TOOLS`, `PLAN_DISABLED`) and bash safe/destructive patterns are in `utils.ts`. The model-profile config file path is `~/.pi/agent/model-profiles.json` (NOT `models.json`, which is reserved for pi's custom provider definitions). Change these with care.
 
 ## Known Issues & Gotchas
-- **Test infrastructure exists** — 144+ tests across `index.test.ts`, `profiles.test.ts`, and `utils.test.ts` using vitest. Always run `npm test` before committing non-trivial changes.
+- **Test infrastructure exists** — 187+ tests across `index.test.ts`, `profiles.test.ts`, and `utils.test.ts` using vitest. Always run `npm test` before committing non-trivial changes.
 - **Snapshot cap at 100:** Long-running sessions in auto mode that touch >100 outside-cwd paths will LRU-evict oldest snapshots. The user gets a notification on eviction. This is intentional — prevents unbounded tmp dir growth.
 - The `--permission-mode` flag uses a distinct name because pi has a built-in `--mode` flag for output format (text/json/rpc). Do not rename it to `--mode`.
 - Auto mode follow-up logic is currently enabled in `index.ts` (the `turn_end` handler block); failures are caught with `console.warn` so a missing followUp support in older pi versions degrades gracefully.
@@ -104,7 +106,6 @@ permission-modes/             # @aprimediet/permission-modes
 - **memory (@aprimediet/memory):** Active (8+ entries). Durable facts are stored at `~/.pi/projects/permission-modes-45ea0551/memory/`. Use `memory_write` to save decisions/gotchas and `memory_search` to recall context.
 
 ## Current Focus
-- **v1.1.2** built but not yet published (`@aprimediet/permission-modes@1.1.2`)
-- 112 passing tests (vitest) — 42 utils + 31 profiles + 39 index integration
-- New in v1.1.2: `Alt+I` shortcut to cycle through model profiles; fixed `applyProfileModelForMode` so in-memory profile switches (`/model-profile <name>`, `Alt+I`) actually re-apply the model mapping
+- **v1.1.4** released — config schema extended, skill filtering in before_agent_start, 187 tests
+- **v1.1.5** next — tool filtering, /mode-config command, interactive selectors
 - See [CHANGELOG.md](CHANGELOG.md) for full release history

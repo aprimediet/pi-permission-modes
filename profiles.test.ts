@@ -20,7 +20,10 @@ import {
 	loadModelProfiles,
 	parseModelId,
 	profileExists,
+	resolveModeConfig,
 	resolveModelForMode,
+	resolveSkillFilter,
+	resolveToolFilter,
 	ensureModelProfilesConfig,
 	setModelsPath,
 	type ModelProfilesConfig,
@@ -323,5 +326,195 @@ describe("ensureModelProfilesConfig (with tmpfile fixture)", () => {
 		// If the file happened to exist in the real path, that's fine — we only
 		// assert no crash.
 		void before
+	})
+})
+
+// ---- resolveModeConfig --------------------------------------------------
+
+describe("resolveModeConfig", () => {
+	it("returns all-defaults for empty config", () => {
+		const result = resolveModeConfig({}, "ask")
+		expect(result.skills).toEqual(["*"])
+		expect(result.tools).toEqual(["*"])
+		expect(result.model).toBeUndefined()
+	})
+
+	it("normalizes string entry to ModeConfig", () => {
+		const config: ModelProfilesConfig = {
+			default: { ask: "anthropic/claude-sonnet-4-5" },
+		}
+		const result = resolveModeConfig(config, "ask")
+		expect(result.model).toBe("anthropic/claude-sonnet-4-5")
+		expect(result.skills).toEqual(["*"])
+		expect(result.tools).toEqual(["*"])
+	})
+
+	it("returns explicit ModeConfig object when configured", () => {
+		const config: ModelProfilesConfig = {
+			default: {
+				plan: {
+					model: "anthropic/claude-sonnet-4-5",
+					skills: ["brainstorming", "writing-plans"],
+					tools: ["read", "bash", "grep", "find", "ls"],
+				},
+			},
+		}
+		const result = resolveModeConfig(config, "plan")
+		expect(result.model).toBe("anthropic/claude-sonnet-4-5")
+		expect(result.skills).toEqual(["brainstorming", "writing-plans"])
+		expect(result.tools).toEqual(["read", "bash", "grep", "find", "ls"])
+	})
+
+	it("prefers active profile over default", () => {
+		const config: ModelProfilesConfig = {
+			active: "custom",
+			custom: { plan: { skills: ["only-this"] } },
+			default: { plan: { skills: ["default-skill"] } },
+		}
+		const result = resolveModeConfig(config, "plan")
+		expect(result.skills).toEqual(["only-this"])
+	})
+
+	it("falls back to default when active profile has no entry for that mode", () => {
+		const config: ModelProfilesConfig = {
+			active: "custom",
+			custom: { ask: { skills: ["ask-skill"] } },   // no plan entry
+			default: { plan: { skills: ["fallback-skill"] } },
+		}
+		const result = resolveModeConfig(config, "plan")
+		expect(result.skills).toEqual(["fallback-skill"])
+	})
+
+	it("falls back to hardcoded defaults when no profile provides mode entry", () => {
+		const config: ModelProfilesConfig = {
+			active: "minimal",
+			minimal: {},
+			default: {},
+		}
+		const result = resolveModeConfig(config, "auto")
+		expect(result.skills).toEqual(["*"])
+		expect(result.tools).toEqual(["*"])
+	})
+
+	it("ignores string active profile value (not an object)", () => {
+		// Edge case: "active" key is a string pointer, not a profile object
+		const config = { active: "main" } as ModelProfilesConfig
+		const result = resolveModeConfig(config, "ask")
+		expect(result.skills).toEqual(["*"])
+	})
+
+	it("handles mixed profile — some modes strings, some objects", () => {
+		const config: ModelProfilesConfig = {
+			default: {
+				ask: "fast/model",
+				plan: {
+					model: "big/model",
+					skills: ["planning"],
+				},
+				auto: "fast/model",
+			},
+		}
+		expect(resolveModeConfig(config, "ask").model).toBe("fast/model")
+		expect(resolveModeConfig(config, "plan").skills).toEqual(["planning"])
+		expect(resolveModeConfig(config, "auto").skills).toEqual(["*"])
+	})
+
+	it("preserves empty skill filter as explicit empty list", () => {
+		const config: ModelProfilesConfig = {
+			default: { plan: { skills: [] } },
+		}
+		const result = resolveModeConfig(config, "plan")
+		expect(result.skills).toEqual([])
+	})
+})
+
+// ---- resolveSkillFilter -------------------------------------------------
+
+describe("resolveSkillFilter", () => {
+	it("returns ['*'] when no filter configured", () => {
+		expect(resolveSkillFilter({}, "ask")).toEqual(["*"])
+	})
+
+	it("returns explicit list from config", () => {
+		const config: ModelProfilesConfig = {
+			default: { plan: { skills: ["brainstorming", "writing-plans"] } },
+		}
+		expect(resolveSkillFilter(config, "plan")).toEqual([
+			"brainstorming",
+			"writing-plans",
+		])
+	})
+
+	it("returns ['*'] from string entry (backward compat)", () => {
+		const config: ModelProfilesConfig = {
+			default: { ask: "provider/model" },
+		}
+		expect(resolveSkillFilter(config, "ask")).toEqual(["*"])
+	})
+
+	it("returns empty list when explicitly configured as empty", () => {
+		const config: ModelProfilesConfig = {
+			default: { ask: { skills: [] } },
+		}
+		expect(resolveSkillFilter(config, "ask")).toEqual([])
+	})
+
+	it("resolves per-mode independently", () => {
+		const config: ModelProfilesConfig = {
+			default: {
+				ask: { skills: ["a"] },
+				plan: { skills: ["b", "c"] },
+				auto: { skills: ["*"] },
+			},
+		}
+		expect(resolveSkillFilter(config, "ask")).toEqual(["a"])
+		expect(resolveSkillFilter(config, "plan")).toEqual(["b", "c"])
+		expect(resolveSkillFilter(config, "auto")).toEqual(["*"])
+	})
+})
+
+// ---- resolveToolFilter --------------------------------------------------
+
+describe("resolveToolFilter", () => {
+	it("returns '*' when no filter configured", () => {
+		expect(resolveToolFilter({}, "ask")).toBe("*")
+	})
+
+	it("returns explicit list with read always present", () => {
+		const config: ModelProfilesConfig = {
+			default: { auto: { tools: ["bash", "write"] } },
+		}
+		const result = resolveToolFilter(config, "auto")
+		// read should be re-injected
+		expect(result).toContain("read")
+		expect(result).toContain("bash")
+		expect(result).toContain("write")
+	})
+
+	it("returns '*' from string entry (backward compat)", () => {
+		const config: ModelProfilesConfig = {
+			default: { ask: "provider/model" },
+		}
+		expect(resolveToolFilter(config, "ask")).toBe("*")
+	})
+
+	it("keeps read even when user explicitly omits it", () => {
+		const config: ModelProfilesConfig = {
+			default: { plan: { tools: ["bash"] } },
+		}
+		const result = resolveToolFilter(config, "plan") as string[]
+		expect(result).toContain("read")    // mandatory
+		expect(result).toContain("bash")    // user's choice
+		expect(result.length).toBe(2)       // read + bash
+	})
+
+	it("deduplicates when read is already in the user's list", () => {
+		const config: ModelProfilesConfig = {
+			default: { ask: { tools: ["read", "bash", "grep"] } },
+		}
+		const result = resolveToolFilter(config, "ask") as string[]
+		const readCount = result.filter((t) => t === "read").length
+		expect(readCount).toBe(1)
+		expect(result.length).toBe(3)
 	})
 })

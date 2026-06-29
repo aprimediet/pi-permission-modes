@@ -7,6 +7,7 @@ import { readdirSync, existsSync, readFileSync, unlinkSync } from "node:fs";
 import {
 	commandTargetsOutsideCwd,
 	extractTodoItems,
+	filterSkillsFromPrompt,
 	findProjectRoot,
 	formatCount,
 	getProjectId,
@@ -563,3 +564,160 @@ describe("restoreOutsideWrite + popTrackedOutsideWrite", () => {
 	});
 });
 
+// ---- filterSkillsFromPrompt --------------------------------------------
+
+describe("filterSkillsFromPrompt", () => {
+	const sampleSkillBlock =
+		'<skill name="systematic-debugging" description="Use when encountering any bug">\nSystematic debugging instructions...\n</skill>'
+
+	const multiSkillPrompt = [
+		'<skill name="brainstorming" description="Use before any creative work">\nBrainstorming instructions...\n</skill>',
+		'',
+		'<skill name="writing-plans" description="Use when you have a spec">\nPlan writing instructions...\n</skill>',
+		'',
+		sampleSkillBlock,
+		'',
+		'## Available tools',
+		'- read: Read files',
+		'- bash: Execute commands',
+	].join("\n")
+
+	it("returns prompt unchanged when allowedSkills is ['*']", () => {
+		const result = filterSkillsFromPrompt(multiSkillPrompt, ["*"])
+		expect(result).toBe(multiSkillPrompt)
+	})
+
+	it("returns prompt unchanged when allowedSkills is empty", () => {
+		const result = filterSkillsFromPrompt(multiSkillPrompt, [])
+		expect(result).toBe(multiSkillPrompt)
+	})
+
+	it("returns prompt unchanged when no skill blocks found", () => {
+		const plain = "Just a regular prompt without skill blocks."
+		const result = filterSkillsFromPrompt(plain, ["brainstorming"])
+		expect(result).toBe(plain)
+	})
+
+	it("returns prompt unchanged when allowedSkills includes all present skills", () => {
+		const result = filterSkillsFromPrompt(multiSkillPrompt, [
+			"brainstorming",
+			"writing-plans",
+			"systematic-debugging",
+		])
+		expect(result).toBe(multiSkillPrompt)
+	})
+
+	it("removes skill blocks not in the allowlist", () => {
+		const result = filterSkillsFromPrompt(multiSkillPrompt, [
+			"brainstorming",
+			"writing-plans",
+		])
+
+		// Should still contain the allowed skills
+		expect(result).toContain("brainstorming")
+		expect(result).toContain("writing-plans")
+		// Should NOT contain the filtered skill
+		expect(result).not.toContain("systematic-debugging")
+		// Should still contain non-skill content
+		expect(result).toContain("Available tools")
+	})
+
+	it("removes ALL skill blocks when allowedSkills list doesn't match any", () => {
+		const result = filterSkillsFromPrompt(multiSkillPrompt, [
+			"nonexistent-skill",
+		])
+		expect(result).not.toContain("<skill")
+		expect(result).not.toContain("brainstorming")
+		expect(result).not.toContain("systematic-debugging")
+		expect(result).toContain("Available tools")
+	})
+
+	it("handles multiline skill content", () => {
+		const prompt = [
+			'<skill name="multi" description="test">',
+			"Line 1",
+			"Line 2",
+			"",
+			"Line 4",
+			"</skill>",
+		].join("\n")
+		const result = filterSkillsFromPrompt(prompt, ["multi"])
+		expect(result).toBe(prompt)
+	})
+
+	it("handles skill blocks with extra attributes", () => {
+		const prompt =
+			'<skill name="test" description="Do thing" compatibility="linux">\ncontent\n</skill>'
+		const result = filterSkillsFromPrompt(prompt, ["test"])
+		expect(result).toBe(prompt)
+	})
+
+	it("handles a realistic mixed prompt (skills + instructions + mode context)", () => {
+		const realisticPrompt = [
+			"You are a helpful coding assistant...",
+			"",
+			'<skill name="brainstorming" description="Use before any creative work">',
+			"# Brainstorming Skill",
+			"Ask clarifying questions before starting implementation.",
+			"</skill>",
+			"",
+			'<skill name="systematic-debugging" description="Debug systematically">',
+			"# Debugging Skill",
+			"Identify root cause before fixing.",
+			"</skill>",
+			"",
+			"[ASK MODE ACTIVE] Standard mode...",
+			"",
+			"## Available tools",
+			"- read",
+			"- bash",
+		].join("\n")
+
+		const result = filterSkillsFromPrompt(realisticPrompt, ["brainstorming"])
+
+		expect(result).toContain("brainstorming")
+		expect(result).toContain("Ask clarifying questions")
+		expect(result).not.toContain("systematic-debugging")
+		expect(result).not.toContain("Debug systematically")
+		expect(result).toContain("[ASK MODE ACTIVE]")
+		expect(result).toContain("Available tools")
+	})
+
+	it("is a no-op for empty string prompt", () => {
+		expect(filterSkillsFromPrompt("", ["brainstorming"])).toBe("")
+	})
+
+	it("handles skill name at regex boundary (single char)", () => {
+		// Per Agent Skills spec, names are [a-z0-9-] with min length 1
+		const prompt = '<skill name="a" description="single">\ncontent\n</skill>'
+		const result = filterSkillsFromPrompt(prompt, ["a"])
+		expect(result).toBe(prompt)
+	})
+
+	it("preserves whitespace between remaining skill blocks", () => {
+		const prompt = [
+			'<skill name="a" description="a">\nAa\n</skill>',
+			"",
+			'<skill name="b" description="b">\nBb\n</skill>',
+			"",
+			'<skill name="c" description="c">\nCc\n</skill>',
+		].join("\n")
+		const result = filterSkillsFromPrompt(prompt, ["a", "c"])
+		// Should keep a and c, remove b
+		expect(result).toContain('<skill name="a"')
+		expect(result).toContain('<skill name="c"')
+		expect(result).not.toContain('<skill name="b"')
+	})
+
+	it("handles consecutive non-skill text correctly", () => {
+		const prompt =
+			"Header\n\n<skill name=\"skill-a\" description=\"a\">\nContent A\n</skill>\n\nMiddle text\n\n<skill name=\"skill-b\" description=\"b\">\nContent B\n</skill>\n\nFooter"
+		const result = filterSkillsFromPrompt(prompt, ["skill-a"])
+		expect(result).toContain("Header")
+		expect(result).toContain("Content A")
+		expect(result).toContain("Middle text")
+		expect(result).toContain("Footer")
+		expect(result).not.toContain("skill-b")
+		expect(result).not.toContain("Content B")
+	})
+})
