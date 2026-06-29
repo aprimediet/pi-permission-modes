@@ -84,7 +84,7 @@ Plan:
 ...
 
 Do NOT make any changes — only describe what you would do.`,
-  auto: "[AUTO MODE ACTIVE] All tool calls are auto-approved. Work autonomously without asking for permission until the task is complete. When everything is done, say the task is complete.",
+  auto: "[AUTO MODE ACTIVE] All tool calls are auto-approved. Work autonomously without asking for permission until the task is complete. When you write or edit files outside the working directory, the change is automatically tracked (snapshotted) so the user can roll it back with /undo-outside-writes if needed. When everything is done, say the task is complete.",
 };
 
 type Block = { block: true; reason: string } | undefined;

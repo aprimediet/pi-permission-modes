@@ -44,37 +44,48 @@ In auto mode, the following are **auto-approved** without any user prompt:
 
 ---
 
-## 4. UI confirmation prompts
+## 4. Auto-approve conditions (v1.1.3)
 
-### 4a. Outside-cwd edit/write prompt (NEW in v1.1.0)
+In auto mode, the following are **auto-approved** without any user prompt:
 
-| Field | Value |
+| Event | Condition |
 |---|---|
-| **Trigger** | `tool === "edit"` **or** `tool === "write"` **AND** `isOutsideCwd(path, ctx.cwd) === true` |
-| **Title** | `` `Allow write outside cwd on "${path}"?` `` |
-| **Options** | `["Allow", "Block"]` |
+| `edit` / `write` | Path is **inside** cwd (`isOutsideCwd === false`) |
+| `edit` / `write` (NEW v1.1.3) | Path is **outside** cwd — auto-approved but **tracked** via `trackOutsideWrite()` for `/undo-outside-writes` rollback |
+| `read` | Any path (inside or outside cwd) |
+| `bash` (read-only) | `isSafeCommand(cmd) === true` |
+| `bash` (destructive) | Command targets **inside** cwd (`commandTargetsOutsideCwd === false`) |
 
-| Result | Action |
+---
+
+## 4a. Outside-cwd write tracking (NEW v1.1.3)
+
+When auto mode approves an `edit`/`write` outside cwd:
+1. The file's pre-write content is read and saved as a snapshot JSON file in `<cwd>/.pi/projects/<project-id>/tmp/outside-writes/`
+2. If the file doesn't exist yet, `backupContent` is `null` (the undo action will delete the file)
+3. A notification is shown: `📝 tracked outside-cwd <tool>: <shortenedPath>`
+4. The snapshot is capped at 100 entries (LRU-evicts oldest; notification on eviction)
+
+### Undo commands
+
+| Command | Behavior |
 |---|---|
-| `"Allow"` | Return `undefined` |
-| `"Block"` | `{ block: true, reason: \`${tool} blocked by user on ${path} (outside cwd)\` }` |
-| No UI | `{ block: true, reason: \`${tool} blocked: no UI available to confirm.\` }` |
+| `/outside-writes` | List tracked writes (read-only) |
+| `/undo-outside-writes` | Interactive selector (newest first) |
+| `/undo-outside-writes all` | Restore all without prompting |
+| `/undo-outside-writes --list` | Alias for `/outside-writes` |
 
-### 4b. Outside-cwd destructive bash prompt (NEW in v1.1.0)
+### Restore behavior
 
-| Field | Value |
-|---|---|
-| **Trigger** | `tool === "bash"` **AND** `isSafeCommand(cmd) === false` **AND** `commandTargetsOutsideCwd(cmd, ctx.cwd) === true` |
-| **Title** | `` `Allow destructive action outside working directory: "${cmd}"?` `` |
-| **Options** | `["Allow", "Block"]` |
+- `backupContent !== null`: Write the original content back to the file (creates parent dirs if needed)
+- `backupContent === null`: Delete the file (if it still exists)
+- Externally modified files: Restore anyway (snapshot is authoritative) + warn the user
 
-| Condition | Action |
-|---|---|
-| Safe command | Auto-approve |
-| Destructive + inside cwd | Auto-approve |
-| Destructive + outside cwd + `"Allow"` | Return `undefined` |
-| Destructive + outside cwd + `"Block"` | `{ block: true, reason: \`bash blocked by user (outside cwd)\` }` |
-| Destructive + outside cwd + no UI | `{ block: true, reason: \`bash blocked: no UI available to confirm.\` }` |
+---
+
+## 4b. UI confirmation prompts (v1.1.0)
+
+### 4b-i. Outside-cwd destructive bash prompt (unchanged from v1.1.0)
 
 ---
 
@@ -99,13 +110,14 @@ The auto-continue logic in the `turn_end` handler is **commented out** in both v
 
 ---
 
-## 6. Decision tree (tool_call gate pseudocode)
+## 6. Decision tree (tool_call gate pseudocode, v1.1.3)
 
 ```
 if currentMode === "auto":
   if tool === "edit" || tool === "write":
     if isOutsideCwd(path, ctx.cwd):
-      prompt 4a (outside-cwd edit/write)
+      track snapshot + notify  # NEW v1.1.3 — was prompt
+      auto-approve
     else:
       auto-approve
   elif tool === "bash":

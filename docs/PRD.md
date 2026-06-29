@@ -40,6 +40,9 @@ In Plan mode, edits and writes are disabled and bash is restricted to read-only 
 ### Per-Mode Model Profiles (v1.1.1)
 Users define named profiles in `~/.pi/agent/model-profiles.json` mapping each mode (ask / plan / auto) to a model ID (`"provider/model"` or `"provider/model:thinking"`). When the mode changes, the extension auto-switches the model via `pi.setModel()`. Profiles are activated via `/model-profile` (with optional selector or `<name>` argument) or the `--model-profile <name>` start flag, and persisted across session resume. The footer shows `profile:<name> · model/thinking` when a profile is active. Lazy re-read on every mode switch picks up edits to the config without requiring `/reload`.
 
+### Outside-Cwd Write Tracking (v1.1.3)
+Auto mode now auto-approves `edit`/`write` outside the working directory but snapshots each one to `<cwd>/.pi/projects/<id>/tmp/outside-writes/` for potential rollback. Use `/undo-outside-writes` to restore or `/outside-writes` to list tracked writes. The snapshot captures the file's pre-write content (or `null` if the file didn't exist). Snapshots are capped at 100 entries (LRU eviction).
+
 ### UI Integration
 A status pill shows the current mode with color-coded role (muted/warning/success/accent). A custom footer displays mode · current-working-directory [git-branch] · model/thinking-level (or `profile:name · model/thinking-level` when a profile is active). During execution, live token stats and context usage are shown.
 
@@ -63,3 +66,12 @@ The current mode, auto-mode follow-up depth cap, and active profile name are per
 
 ## Open Questions
 - None at this time.
+
+## Commands (v1.1.3)
+
+| Command | Behavior |
+|---|---|
+| `/outside-writes` | List tracked outside-cwd writes from auto mode (read-only) |
+| `/undo-outside-writes` | Restore files modified by auto mode outside cwd (selector, `all`, or `--list`) |
+| `/undo-outside-writes all` | Restore all tracked writes without prompting |
+| `/undo-outside-writes --list` | Alias for `/outside-writes` |

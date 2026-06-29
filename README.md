@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/@aprimediet/permission-modes)](https://www.npmjs.com/package/@aprimediet/permission-modes)
 [![License](https://img.shields.io/npm/l/@aprimediet/permission-modes)](LICENSE)
 
-Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Three modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. v1.1.1 adds **per-mode model profiles** — when you switch modes, the model can switch with you.
+Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Three modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. v1.1.1 adds **per-mode model profiles**. v1.1.3 adds **outside-cwd write tracking** with `/undo-outside-writes`. — when you switch modes, the model can switch with you.
 
 ## Modes
 
@@ -11,7 +11,7 @@ Claude-Code-style **permission modes** for the [pi coding agent](https://www.npm
 |---|---|---|---|---|
 | **ask** `●` | prompt on each edit/write (`Allow` / `Allow all → auto` / `Block`) | **prompt** | mutating commands prompt; read-only pass | — |
 | **plan** `⏸` | disabled (stripped from the active tool set) | allowed (exploration needed for planning) | read-only allowlist only; mutating commands blocked | produce a numbered `Plan:`, then **Execute / Stay / Refine** |
-| **auto** `▶` | auto-approved (prompts if **outside** project root) | auto-approved | auto-approved; prompts if destructive **outside** project root | auto-continues until done, bounded by `/auto-depth` |
+| **auto** `▶` | auto-approved (outside cwd tracked for undo via `/undo-outside-writes`) | auto-approved | auto-approved; prompts if destructive **outside** project root | auto-continues until done, bounded by `/auto-depth` |
 
 **Cycle (Shift+Tab):** ask → plan → auto → ask.
 
@@ -55,10 +55,23 @@ If the file doesn't exist on first install, the extension creates it for you (pr
 | Shortcut | `Shift+Tab` | cycle modes |
 | Shortcut | `Alt+T` | cycle thinking level (off → minimal → low → medium → high → xhigh) |
 | Shortcut | `Alt+I` | cycle model profile (next profile from `~/.pi/agent/model-profiles.json`; re-applies the model for the current mode) |
+| Command | `/outside-writes` | list tracked outside-cwd writes (read-only) |
+| Command | `/undo-outside-writes` | restore outside-cwd writes (selector, `all`, or `--list`) |
 | Flag | `--permission-mode <name>` | start in a mode (accepts `ask`, `plan`, `auto`, or `default` as alias; default `ask`) |
 | Flag | `--model-profile <name>` | start with a named profile activated |
 
 > The start-mode flag is `--permission-mode` (not `--mode`) because pi already has a built-in `--mode` for output format (text/json/rpc).
+
+### Outside-cwd write tracking (v1.1.3)
+
+In **auto mode**, `edit` and `write` calls to paths outside the working directory are auto-approved — but each one is snapshotted to `<cwd>/.pi/projects/<project-id>/tmp/outside-writes/`. Use `/undo-outside-writes` to roll back:
+
+- `/undo-outside-writes` — interactive selector (newest first)
+- `/undo-outside-writes all` — restore all without prompting
+- `/undo-outside-writes --list` — list only (alias for `/outside-writes`)
+- `/outside-writes` — same as `--list`
+
+Snapshots capture the file's pre-write content (or `null` if the file didn't exist). They persist across sessions until you undo them. The snapshot cap is 100 entries (oldest are evicted; you get a notification).
 
 ### Plan mode flow
 
@@ -94,7 +107,7 @@ Auto-discovery also works: drop this folder at `~/.pi/agent/extensions/permissio
 ## Testing
 
 ```bash
-npm test                # run all 112 tests (vitest)
+npm test                # run all 144+ tests (vitest)
 npm run test:watch      # watch mode for development
 ```
 
