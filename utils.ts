@@ -186,9 +186,18 @@ export function markCompletedSteps(text: string, items: TodoItem[]): number {
  *
  * Matches patterns like:
  *   - "the plan is complete", "task is done", "everything is finished"
- *   - "all done"
- *   - "no more changes needed", "no further work"
- *   - "finished"
+ *   - "all done", "all set", "all good"
+ *   - "no more changes needed", "no further work", "nothing else to do"
+ *   - "finished", "done", "complete" at end of line
+ *   - "all tests passing", "tests pass", "tests are passing"
+ *   - "here's a summary", "summary of changes", "here is a summary"
+ *   - "fixed the issue", "bug fixed", "issue resolved"
+ *   - "changes have been applied", "all changes applied"
+ *   - "ready for review", "ready to review", "ready for merge"
+ *   - "implementation complete", "done with the implementation"
+ *   - "that should be everything", "that should do it"
+ *   - "nothing more to do", "nothing else to do"
+ *   - Indonesian: "selesai", "sudah", "beres", "sudah selesai", "sudah jadi"
  */
 export function isCompletionSignal(text: string): boolean {
 	if (!text) return false;
@@ -198,8 +207,21 @@ export function isCompletionSignal(text: string): boolean {
 		/\b(plan|task|everything|all)\s+(is\s+)?(complete|completed|done|finished)\b/i,
 		/\ball\s+done\b/i,
 		/\bno\s+(more|further|additional)\s+(work|changes|steps?|edits?|tasks?)\b/i,
+		/\b(none|nothing)\s+(else|more)\s+(to\s+)?do\b/i,
 		/\b(finished|done|complete)\b\s*[\.\!\?]*\s*$/i,
 		/^\s*(done|finished|complete)\s*[\.\!\?]*\s*$/i,
+		/\b(all\s+)?(tests?|checks?)\s+(are\s+)?(pass(ing|es)?|succeed(s|ed)?|green)\b/i,
+		/\b(here('s| is)|below|above)\s+(a\s+)?summary\b/i,
+		/\bsummary\s+(of|:)\b/i,
+		/\b(changes?\s+(applied|made|complete)|implementation\s+(done|complete))\b/i,
+		/\b(fixed|resolved|corrected)\s+(the\s+)?(issue|bug|problem)\b/i,
+		/\b(issue|bug|problem)\s+(fixed|resolved|corrected)\b/i,
+		/\bread(y|ied)\s+(for\s+(review|merge)|to\s+(review|merge|go))\b/i,
+		/\b(all\s+)?(set|good)\b\s*[\.\!\?]*\s*$/i,
+		/\b(that|this)\s+(should\s+)?do\s*it\b/i,
+		/\bsudah\s*(selesai|jadi|beres)\b/i,
+		/\bselesai\b/i,
+		/\bberes\b/i,
 	];
 	return patterns.some((p) => p.test(t));
 }

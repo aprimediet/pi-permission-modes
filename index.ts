@@ -99,7 +99,7 @@ export default function (pi: ExtensionAPI): void {
 	// Stream stats cache (for working message). Kept on the closure so it
 	// survives across events but is reset on each new turn.
 	let streamStart = 0;
-	let lastOutputAtStreamStart = 0;
+	let outputAtTurnStart = 0;
 
 	// Cached git branch (read once on session_start, refreshed via footerData events)
 	let gitBranch: string | null = null;
@@ -174,6 +174,26 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	pi.registerCommand("done", {
+		description: "Stop auto-follow-up. Mark the current task as complete — no more 'Continue' will be sent in this session until you manually switch back to auto mode.",
+		handler: async (_args, ctx) => {
+			if (currentMode !== "auto") {
+				ctx.ui.notify("Not in auto mode — nothing to stop.", "info");
+				return;
+			}
+			// Exhaust the follow-up cap so no more Continue is sent
+			if (autoFollowUpDepth > 0) {
+				autoFollowUpCount = autoFollowUpDepth;
+			} else {
+				// Unlimited depth — bump count past a reasonable ceiling
+				autoFollowUpCount = 999_999;
+			}
+			isStepping = true;
+			persistState();
+			ctx.ui.notify("Auto-follow-up stopped. Switch mode or run /auto to resume.", "info");
+		},
+	});
+
 	// ---- Register Shift+Tab shortcut ----
 
 	pi.registerShortcut("shift+tab", {
@@ -231,8 +251,10 @@ export default function (pi: ExtensionAPI): void {
 		const meta = modeMetadata(currentMode);
 		ctx.ui.setStatus("modes", ctx.ui.theme.fg(meta.role, `${meta.icon} ${meta.label}`));
 		const indicator: WorkingIndicatorOptions = {
-			frames: [ctx.ui.theme.fg(meta.role, "●")],
-			intervalMs: 500,
+			frames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"].map(
+				(f) => ctx.ui.theme.fg(meta.role, f),
+			),
+			intervalMs: 80,
 		};
 		ctx.ui.setWorkingIndicator(indicator);
 	}
@@ -321,12 +343,11 @@ export default function (pi: ExtensionAPI): void {
 	function refreshWorkingMessage(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
 		if (streamStart === 0) return;
-		const { input, output, cost, pct } = computeStats(ctx);
-		const now = Date.now();
-		const elapsedSec = Math.max(0.001, (now - streamStart) / 1000);
-		const outDelta = Math.max(0, output - lastOutputAtStreamStart);
-		const tokPerSec = outDelta / elapsedSec;
-		const msg = `Working… (↑${formatCount(input)} ↓${formatCount(output)} ⚡${tokPerSec.toFixed(1)} tok/s · $${cost.toFixed(3)} · ${pct}% ctx)`;
+		const { input, output, pct } = computeStats(ctx);
+		const elapsedSec = Math.max(0.001, (Date.now() - streamStart) / 1000);
+		const outDelta = Math.max(0, output - outputAtTurnStart);
+		const tps = outDelta / elapsedSec;
+		const msg = `Working (${elapsedSec.toFixed(1)}s  ↑${formatCount(input)} ↓${formatCount(output)} ${tps.toFixed(1)} tok/s  ${pct}% ctx)`;
 		ctx.ui.setWorkingMessage(msg);
 	}
 
@@ -482,7 +503,7 @@ Proceed without asking for confirmation. After completing each meaningful chunk,
 	pi.on("turn_start", async (_event, ctx) => {
 		streamStart = Date.now();
 		const stats = computeStats(ctx);
-		lastOutputAtStreamStart = stats.output;
+		outputAtTurnStart = stats.output;
 		refreshWorkingMessage(ctx);
 	});
 

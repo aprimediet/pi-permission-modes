@@ -212,12 +212,13 @@ describe("registration", () => {
 		expect(shortcuts.has("shift+tab")).toBe(true);
 	});
 
-	it("registers /default, /plan, /auto, /mode, /auto-depth commands", () => {
+	it("registers /default, /plan, /auto, /mode, /auto-depth, /done commands", () => {
 		expect(commands.has("default")).toBe(true);
 		expect(commands.has("plan")).toBe(true);
 		expect(commands.has("auto")).toBe(true);
 		expect(commands.has("mode")).toBe(true);
 		expect(commands.has("auto-depth")).toBe(true);
+		expect(commands.has("done")).toBe(true);
 	});
 
 	it("subscribes to tool_call, context, before_agent_start, turn_end, agent_end, session_start, session_tree, turn_start, before_provider_request, message_update", () => {
@@ -510,6 +511,47 @@ describe("/auto-depth command", () => {
 		expect(ctx.ui.notify).toHaveBeenCalledWith("auto-follow-up depth set to 0", "info");
 	});
 });
+
+// ---------- Tests: /done command ----------
+
+describe("/done command", () => {
+	beforeEach(async () => {
+		await emit(handlers, "session_start", {}, ctx);
+		await commands.get("auto")!([], ctx);
+		await commands.get("auto-depth")!("5", ctx);
+		pi.sendUserMessage.mockClear();
+	});
+
+	it("stops auto-follow-up in auto mode by exhausting the cap", async () => {
+		await commands.get("done")!([], ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			expect.stringContaining("Auto-follow-up stopped"),
+			"info",
+		);
+		// After /done, turn_end should NOT trigger a follow-up
+		await emit(handlers, "turn_end", {
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "text", text: "Working..." },
+					{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls" } },
+				],
+			},
+		}, ctx);
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
+
+	it("does nothing when not in auto mode", async () => {
+		await commands.get("default")!([], ctx);
+		ctx.ui.notify.mockClear();
+		await commands.get("done")!([], ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(
+			"Not in auto mode — nothing to stop.",
+			"info",
+		);
+	});
+});
+
 
 // ---------- Tests: context dedup ----------
 

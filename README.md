@@ -37,6 +37,8 @@ pi -e ./index.ts
 - `/auto` — switch to auto mode
 - `/mode [name]` — with no arg, opens a selector; with `default`/`plan`/`auto`, switches directly
 - `/auto-depth <n>` — set the auto-follow-up cap (`0` = unlimited, default `20`)
+- `/done` — stop auto-follow-up immediately. No more "Continue" will be sent in this session until you manually switch back to auto mode.
+  Useful when you're satisfied with the result and want pi to stop.
 
 ### Flag
 
@@ -57,9 +59,13 @@ pi -e ./index.ts
 
 In auto mode, every tool call is auto-approved. After each turn, if the assistant's last message **made tool calls** and does **not** look like a completion signal, pi auto-feeds a "Continue. Auto mode is active — proceed without asking." follow-up message. This loops until:
 
-- the agent stops making tool calls (and emits a completion signal like "all done" / "task complete" / "finished"), or
+- the agent stops making tool calls (and emits a completion signal like "all done" / "task complete" / "finished" / "all tests pass" / "fixed the issue"), or
 - the cap (`/auto-depth <n>`, default `20`) is reached, or
+- the user runs `/done`, or
 - the user manually changes mode.
+
+> Completion detection supports Indonesian phrases like "selesai", "sudah selesai", "beres".
+> If pi keeps going when you're done, run `/done` to stop it.
 
 > Auto mode is intentionally permissive: it auto-approves **everything**, including outside-cwd writes. That's the design.
 

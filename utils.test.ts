@@ -345,6 +345,7 @@ describe("markCompletedSteps", () => {
 
 describe("isCompletionSignal", () => {
 	const complete: string[] = [
+		// Original patterns
 		"The plan is complete.",
 		"Task is done.",
 		"Everything is finished.",
@@ -355,6 +356,56 @@ describe("isCompletionSignal", () => {
 		"Finished.",
 		"Done!",
 		"Complete.",
+		// New: none/nothing else to do
+		"Nothing else to do.",
+		"None more to do.",
+		"Nothing else to do",
+		// New: tests/checks passing
+		"All tests pass.",
+		"Tests passing.",
+		"All tests are passing.",
+		"Tests pass.",
+		"All checks green.",
+		"Checks succeed.",
+		"Tests succeeded.",
+		// New: summary signals
+		"Here is a summary of changes.",
+		"Here\'s a summary of what we did.",
+		"Summary of changes:",
+		// New: changes applied / implementation done
+		"Changes applied.",
+		"All changes applied.",
+		"Changes made.",
+		"Changes complete.",
+		"Implementation done.",
+		"Implementation complete.",
+		// New: fixed/resolved
+		"Fixed the issue.",
+		"Fixed the bug.",
+		"Resolved the problem.",
+		"Bug fixed.",
+		"Issue resolved.",
+		"Corrected the issue.",
+		// New: ready for review/merge
+		"Ready for review.",
+		"Ready for merge.",
+		"Ready to review.",
+		"Ready to merge.",
+		"Ready to go.",
+		// New: all set / all good
+		"All set.",
+		"All good.",
+		"Set.",
+		// New: that should do it
+		"That should do it.",
+		"That should do it",
+		"This should do it.",
+		// New: Indonesian
+		"Selesai.",
+		"Sudah selesai.",
+		"Sudah beres.",
+		"Beres.",
+		"Sudah jadi.",
 	];
 
 	it.each(complete)("detects completion: %s", (text) => {
@@ -369,6 +420,14 @@ describe("isCompletionSignal", () => {
 		"Here is the current state of the code.",
 		"Working on it now.",
 		"I need to make some more changes.",
+		// Should NOT detect: partial phrases / work-in-progress
+		"Completing the implementation now.",
+		"Let me complete the task.",
+		"Do it now.",
+		"I will do it.",
+		"Fixing the issue first.",
+		"I need to test the changes.",
+		"Preparing the implementation.",
 	];
 
 	it.each(notComplete)("does NOT detect completion: %s", (text) => {
