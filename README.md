@@ -1,166 +1,95 @@
-# @aprimediet/permission-modes
+# permission-modes
 
-[![npm version](https://img.shields.io/npm/v/@aprimediet/permission-modes)](https://www.npmjs.com/package/@aprimediet/permission-modes)
-[![License](https://img.shields.io/npm/l/@aprimediet/permission-modes)](LICENSE)
+A Claude-Code-style **Shift+Tab mode cycle** for the [pi coding agent](https://pi.dev).
 
-Claude-Code-style **permission modes** for the [pi coding agent](https://www.npmjs.com/package/@earendil-works/pi-coding-agent). Three modes, cycled with **Shift+Tab**, that control how tool calls and file edits get approved. v1.1.1 adds **per-mode model profiles**. v1.1.3 adds **outside-cwd write tracking** with `/undo-outside-writes`. v1.1.4 adds **per-mode skill filtering** — keep your system prompt lean and focused on the current mode.
+Three modes, cycled with `Shift+Tab` (or via commands):
 
-## Modes
+| Mode    | Edit/Write             | Mutating bash | Read-only bash | Reads  | Behavior                                              |
+| ------- | ---------------------- | ------------- | -------------- | ------ | ----------------------------------------------------- |
+| default | prompt each call       | prompt        | allow          | allow  | Standard "ask before mutating" workflow               |
+| plan    | **disabled**           | **blocked**   | allow          | allow  | Read-only exploration; produce a `Plan:` and execute  |
+| auto    | auto-approve           | auto-approve  | auto-approve   | allow  | Auto-approve everything; auto-follow-up until done    |
 
-| Mode | edit / write | reads outside cwd | bash | agent control |
-|---|---|---|---|---|
-| **ask** `●` | prompt on each edit/write (`Allow` / `Allow all → auto` / `Block`) | **prompt** | mutating commands prompt; read-only pass | — |
-| **plan** `⏸` | disabled (stripped from the active tool set) | allowed (exploration needed for planning) | read-only allowlist only; mutating commands blocked | produce a numbered `Plan:`, then **Execute / Stay / Refine** |
-| **auto** `▶` | auto-approved (outside cwd tracked for undo via `/undo-outside-writes`) | auto-approved | auto-approved; prompts if destructive **outside** project root | auto-continues until done, bounded by `/auto-depth` |
+Cycle order: **default → plan → auto → default**.
 
-**Cycle (Shift+Tab):** ask → plan → auto → ask.
-
-When there is no interactive UI (`pi -p`, `--mode json`), anything that would prompt is **blocked** instead of silently allowed.
-
-## Model profiles (v1.1.1)
-
-Define named profiles in `~/.pi/agent/model-profiles.json` mapping each mode to a model ID:
-
-```json
-{
-  "active": "default",
-  "default": {
-    "ask":  "anthropic/claude-opus-4-5",
-    "plan": "anthropic/claude-opus-4-5",
-    "auto": "anthropic/claude-haiku-4-5"
-  },
-  "fast": {
-    "ask":  "anthropic/claude-haiku-4-5",
-    "plan": "anthropic/claude-haiku-4-5",
-    "auto": "anthropic/claude-haiku-4-5"
-  }
-}
-```
-
-A model ID is `"provider/model"` or `"provider/model:thinking"` (the `:thinking` suffix sets the thinking level after the switch — e.g. `anthropic/claude-sonnet-4-5:high`). When the mode changes, the extension auto-switches the model via `pi.setModel()`. The footer shows `profile:<name> · model/thinking` when a profile is active.
-
-If the file doesn't exist on first install, the extension creates it for you (pre-filled with the user's default model from `~/.pi/agent/settings.json` when available).
-
-**Why a separate `model-profiles.json` and not pi's built-in `models.json`?** Pi uses `~/.pi/agent/models.json` for custom provider definitions; using a different filename avoids format conflict.
-
-## Commands, shortcut, flag
-
-| Kind | Name | Behavior |
-|---|---|---|
-| Command | `/ask`, `/plan`, `/auto` | switch to that mode (`/default` also works as alias) |
-| Command | `/mode [name]` | set the given mode, or pick from a list |
-| Command | `/auto-depth <n>` | cap auto-mode follow-ups (`0` = unlimited; default 20) |
-| Command | `/model-profile` | show selector of available profiles |
-| Command | `/model-profile <name>` | activate the named profile (also `/model-profile list` to print them) |
-| Shortcut | `Shift+Tab` | cycle modes |
-| Shortcut | `Alt+T` | cycle thinking level (off → minimal → low → medium → high → xhigh) |
-| Shortcut | `Alt+I` | cycle model profile (next profile from `~/.pi/agent/model-profiles.json`; re-applies the model for the current mode) |
-| Command | `/outside-writes` | list tracked outside-cwd writes (read-only) |
-| Command | `/undo-outside-writes` | restore outside-cwd writes (selector, `all`, or `--list`) |
-| Flag | `--permission-mode <name>` | start in a mode (accepts `ask`, `plan`, `auto`, or `default` as alias; default `ask`) |
-| Flag | `--model-profile <name>` | start with a named profile activated |
-
-> The start-mode flag is `--permission-mode` (not `--mode`) because pi already has a built-in `--mode` for output format (text/json/rpc).
-
-### Outside-cwd write tracking (v1.1.3)
-
-In **auto mode**, `edit` and `write` calls to paths outside the working directory are auto-approved — but each one is snapshotted to `<cwd>/.pi/projects/<project-id>/tmp/outside-writes/`. Use `/undo-outside-writes` to roll back:
-
-- `/undo-outside-writes` — interactive selector (newest first)
-- `/undo-outside-writes all` — restore all without prompting
-- `/undo-outside-writes --list` — list only (alias for `/outside-writes`)
-- `/outside-writes` — same as `--list`
-
-Snapshots capture the file's pre-write content (or `null` if the file didn't exist). They persist across sessions until you undo them. The snapshot cap is 100 entries (oldest are evicted; you get a notification).
-
-### Per-mode skill filtering (v1.1.4)
-
-When you're in **plan mode**, skills like `systematic-debugging` and `executing-plans` are irrelevant noise. Skill filtering lets you configure which skills get injected into the system prompt per mode — saving tokens and keeping the agent focused.
-
-```json
-{
-  "active": "default",
-  "default": {
-    "ask": "anthropic/claude-sonnet-4-5",
-    "plan": {
-      "model": "anthropic/claude-sonnet-4-5",
-      "skills": ["brainstorming", "writing-plans"]
-    },
-    "auto": "openai/gpt-4o"
-  }
-}
-```
-
-- `"skills": ["brainstorming", "writing-plans"]` — only these two skills appear in the system prompt when in plan mode.
-- `"skills": ["*"]` or omitting `skills` entirely — allow all skills (default, no filtering).
-- String shorthand (`"anthropic/claude-sonnet-4-5"`) still works — backward compatible.
-- Skills can still be invoked manually via `/skill:name` if needed — filtering only controls which skills are pre-loaded into the agent's context.
-
-**Resolution order:** Active profile → default profile → hardcoded defaults (`["*"]`). The `read` tool is always mandatory in tool filters (stub for v1.1.5).
-
-### Plan mode flow
-
-In plan mode the agent explores read-only and emits a numbered list under a `Plan:` header. On completion you choose:
-
-- **Execute the plan** — switches to auto, restores edit/write, runs the steps; a `☐/☑` widget advances as the agent emits `[DONE:n]` tags, and you get **Plan Complete! ✓** at the end.
-- **Stay in plan mode** — keep iterating.
-- **Refine the plan** — opens an editor; your notes are sent back as a follow-up.
-
-## UI
-
-- A status pill and a custom footer showing **mode · cwd [git-branch] · provider/model** (or **profile:name · provider/model** when a profile is active).
-- While the agent is streaming, the working indicator shows live **token / tok-s / cost / % context** stats; it reverts to the default loader when idle.
-
-Current mode, the auto-follow-up depth, and the active profile name **persist** across `/reload` and session resume.
-
-## Install / run
+## Install
 
 ```bash
-# Install as a package (scoped npm name; or from a git remote / local path)
-pi install npm:@aprimediet/permission-modes
-pi list                                            # verify it loaded
-
-# Or run it directly for a quick try (no install)
-pi -e ./extensions/permission-modes/index.ts
-
-# During development, hot-reload after edits
-/reload
+pi install npm:permission-modes
 ```
 
-Auto-discovery also works: drop this folder at `~/.pi/agent/extensions/permission-modes/` (global) or `.pi/extensions/permission-modes/` (project) and pi loads `index.ts` automatically.
-
-## Testing
+Or load directly for a one-off run:
 
 ```bash
-npm test                # run all 144+ tests (vitest)
-npm run test:watch      # watch mode for development
+pi -e ./index.ts
 ```
 
-## Changelog
+## Usage
 
-See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+### Keyboard
 
-## Layout
+- **`Shift+Tab`** — cycle to the next mode (default → plan → auto → default)
+
+### Commands
+
+- `/default` — switch to default mode
+- `/plan` — switch to plan mode (read-only)
+- `/auto` — switch to auto mode
+- `/mode [name]` — with no arg, opens a selector; with `default`/`plan`/`auto`, switches directly
+- `/auto-depth <n>` — set the auto-follow-up cap (`0` = unlimited, default `20`)
+
+### Flag
+
+- `--permission-mode <mode>` — start in `default`, `plan`, or `auto`
+
+> The flag is named `--permission-mode` (not `--mode`) because pi has a built-in `--mode` flag for output mode (text/json/rpc).
+
+## Plan mode flow
+
+1. Run `/plan` (or use `Shift+Tab` to cycle into plan mode).
+2. The agent reads your code, asks clarifying questions, and produces a numbered `Plan:` block.
+3. pi prompts you with three options:
+   - **Execute the plan** — switches out of plan mode, restores `edit`/`write` tools, posts the steps to the agent, and tracks progress with a `☐/☑` widget. The agent emits `[DONE:n]` tags as it finishes each step; pi marks them and posts **Plan Complete ✓** when all are done.
+   - **Stay in plan mode** — keep exploring.
+   - **Refine the plan** — open an editor, type feedback, and the agent iterates.
+
+## Auto mode
+
+In auto mode, every tool call is auto-approved. After each turn, if the assistant's last message **made tool calls** and does **not** look like a completion signal, pi auto-feeds a "Continue. Auto mode is active — proceed without asking." follow-up message. This loops until:
+
+- the agent stops making tool calls (and emits a completion signal like "all done" / "task complete" / "finished"), or
+- the cap (`/auto-depth <n>`, default `20`) is reached, or
+- the user manually changes mode.
+
+> Auto mode is intentionally permissive: it auto-approves **everything**, including outside-cwd writes. That's the design.
+
+## Headless / no-UI safety
+
+In any mode where a UI prompt would normally appear, if `ctx.hasUI === false` (e.g. `pi -p` or RPC mode without a terminal), the tool call is **blocked** with a clear reason — never silently allowed.
+
+## State persistence
+
+The current mode and `autoFollowUpDepth` are persisted to the session via `pi.appendEntry("modes", {...})`. On `/reload`, `/resume`, or tree navigation, the last entry is restored (with legacy value mapping: `"ask"`/`"normal"` → `default`, `"accept-edits"` → `auto`).
+
+If you were mid-plan-execution, the latest `modes-execute` marker is detected and the plan is rebuilt from assistant messages after it, with `[DONE:n]` tags re-applied so the widget reflects the actual state.
+
+## Files
 
 ```
-permission-modes/             # @aprimediet/permission-modes
-├── package.json              # pi manifest + npm package metadata
-├── index.ts                  # main extension (default-exported factory)
-├── profiles.ts               # NEW in v1.1.1: model-profile config helpers
-├── profiles.test.ts          # NEW in v1.1.1: unit tests for profiles
-├── utils.ts                  # bash allowlist + Plan: + [DONE:n] helpers
-├── index.test.ts             # integration tests (vitest)
-├── utils.test.ts             # unit tests (vitest)
-├── vitest.config.ts          # vitest config
-├── CHANGELOG.md              # release history
-├── LICENSE                   # MIT
-├── .gitignore                # excludes node_modules, lockfile, .pi/
-└── docs/
-    ├── PRD.md                # product requirements
-    └── prompts/              # mode-specific prompt context
-        ├── ask-mode-prompts.md
-        ├── plan-mode-prompts.md
-        └── auto-mode-prompts.md
+permission-modes/
+├── package.json
+├── README.md
+├── index.ts          # main factory
+├── utils.ts          # isSafeCommand, plan extraction, completion signal, formatCount
+├── vitest.config.ts
+├── utils.test.ts
+└── index.test.ts
 ```
 
-Third-party deps: none. Peer dependencies (bundled by pi): `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai`, `@earendil-works/pi-tui`, `typebox`. The model is switched **only when the user opts in via `~/.pi/agent/model-profiles.json`** — without a profile config file, the model never changes and the extension behaves exactly as in v1.1.0.
+## Tests
+
+```bash
+npm test
+```
+
+`utils.test.ts` covers the bash safety classifier, plan extraction, `[DONE:n]` marking, and completion-signal detection.

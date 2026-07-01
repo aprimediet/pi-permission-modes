@@ -1,1401 +1,855 @@
 /**
  * Integration tests for the permission-modes extension.
  *
- * Strategy: import the extension factory with a fake `ExtensionAPI` stub.
- * The stub captures all `pi.on(event, handler)` subscriptions; we then invoke
- * the captured `tool_call` handler directly with crafted events and contexts.
- *
- * This lets us assert the gate decision tree without booting real pi.
+ * These tests instantiate the extension factory against a lightweight mock
+ * ExtensionAPI/ExtensionContext so we can exercise the mode-switch, gate, and
+ * lifecycle wiring without spinning up the full TUI runtime.
  */
 
-import { describe, expect, it, beforeEach, vi } from "vitest"
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
-import { mkdtempSync } from "node:fs"
-import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import factory from "./index.ts";
+import { isSafeCommand } from "./utils.ts";
 
-import permissionModesExtension from "./index.ts"
-import { setModelsPath } from "./profiles.ts"
-import {
-	listTrackedOutsideWrites,
-	type OutsideWriteSnapshot,
-} from "./utils.ts"
+// ---------- Mock helpers ----------
 
-// ---- minimal fake pi API ------------------------------------------------
+type AnyHandler = (...args: unknown[]) => unknown;
 
-type Handler = (event: unknown, ctx: unknown) => unknown | Promise<unknown>
-
-type CommandHandler = (
-	args: string,
-	ctx: unknown,
-) => unknown | Promise<unknown>
-
-interface FakePi {
-	handlers: Map<string, Handler[]>
-	commands: Map<string, CommandHandler>
-	shortcuts: Map<string, Handler>
-	userMessages: Array<{ text: string; opts?: unknown }>
-	sentMessages: Array<{
-		message: { customType?: string; content?: unknown; display?: boolean }
-		opts?: unknown
-	}>
-	appendEntries: Array<{ type: string; data: unknown }>
-	activeTools: string[]
-	flags: Record<string, unknown>
-	setModelCalls: Array<{ model: unknown }>
-	thinkingLevel: string
-	modelRegistry: Map<string, Map<string, unknown>>
-	getToolCallHandler: (mode?: string) => Handler | undefined
-	simulateSessionStart: (
-		cwd: string,
-		ui?: unknown,
-		registry?: { find: (provider: string, model: string) => unknown },
-	) => Promise<void>
-	simulateToolCall: (
-		toolName: string,
-		input: Record<string, unknown>,
-		ctx: object,
-	) => Promise<unknown>
-	simulateCommand: (name: string, args: string, ctx: object) => Promise<unknown>
-	simulateShortcut: (
-		key: string,
-		ctx: object,
-	) => Promise<unknown>
+interface MockUI {
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	select: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	confirm: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	input: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	editor: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	notify: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	setStatus: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	setWidget: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	setWorkingMessage: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	setWorkingIndicator: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	setFooter: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	custom: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	setTitle: any;
 }
 
-interface FakeCtxOptions {
-	mode?: string
-	cwd: string
-	projectRoot?: string | null
-	ui?: {
-		select?: (label: string, options: string[]) => Promise<string>
-		notify?: (msg: string) => void
-		editor?: (label: string, val: string) => Promise<string | undefined>
-	}
+interface MockContext {
+	hasUI: boolean;
+	mode: "tui" | "rpc" | "json" | "print";
+	cwd: string;
+	model: { provider: string; id: string } | undefined;
+	ui: MockUI;
+	sessionManager: {
+		// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+		getEntries: any;
+		// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+		getBranch: any;
+		// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+		getGitBranch: any;
+	};
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	getContextUsage: any;
+	signal: AbortSignal | undefined;
 }
 
-function createFakePi(): FakePi {
-	const handlers = new Map<string, Handler[]>()
-	const commands = new Map<string, CommandHandler>()
-	const shortcuts = new Map<string, Handler>()
-	const userMessages: Array<{ text: string; opts?: unknown }> = []
-	const sentMessages: Array<{
-		message: { customType?: string; content?: unknown; display?: boolean }
-		opts?: unknown
-	}> = []
-	const appendEntries: Array<{ type: string; data: unknown }> = []
-	const activeTools = ["read", "edit", "write", "bash", "grep", "find"]
-	const flags: Record<string, unknown> = { "permission-mode": "ask" }
-	const setModelCalls: Array<{ model: unknown }> = []
-	let thinkingLevel = "off"
-	const modelRegistry = new Map<string, Map<string, unknown>>()
-
-	const pi = {
-		handlers,
-		commands,
-		shortcuts,
-		userMessages,
-		sentMessages,
-		appendEntries,
-		activeTools,
-		flags,
-		setModelCalls,
-		getThinkingLevel: () => thinkingLevel,
-		setThinkingLevel: (l: string) => {
-			thinkingLevel = l
-		},
-		modelRegistry: {
-			find: (provider: string, model: string) => {
-				const providerMap = modelRegistry.get(provider)
-				if (!providerMap) return undefined
-				return providerMap.get(model)
-			},
-		},
-
-		on(event: string, handler: Handler) {
-			const list = handlers.get(event) ?? []
-			list.push(handler)
-			handlers.set(event, list)
-		},
-		registerCommand(name: string, def: { handler: CommandHandler }) {
-			commands.set(name, def.handler)
-		},
-		registerShortcut(key: string, def: { handler: Handler }) {
-			shortcuts.set(key, def.handler)
-		},
-		registerFlag(name: string, def: { default?: unknown }) {
-			// Always record the flag so the extension can read it via getFlag.
-			// Default is honored when provided.
-			if (def?.default !== undefined) flags[name] = def.default
-			else if (!(name in flags)) flags[name] = undefined
-		},
-		getFlag(name: string) {
-			return flags[name]
-		},
-		appendEntry(type: string, data: unknown) {
-			appendEntries.push({ type, data })
-		},
-		getActiveTools() {
-			return [...activeTools]
-		},
-		setActiveTools(tools: string[]) {
-			activeTools.length = 0
-			activeTools.push(...tools)
-		},
-		sendUserMessage(text: string, opts?: unknown) {
-			userMessages.push({ text, opts })
-		},
-		sendMessage(message: unknown, opts?: unknown) {
-			sentMessages.push({ message: message as never, opts })
-		},
-		async setModel(model: unknown) {
-			setModelCalls.push({ model })
-			return true
-		},
-
-		// Test helpers
-		getToolCallHandler() {
-			const list = handlers.get("tool_call") ?? []
-			return list[0]
-		},
-		async simulateSessionStart(
-			cwd: string,
-			ui?: unknown,
-			registry?: { find: (provider: string, model: string) => unknown },
-		) {
-			const list = handlers.get("session_start") ?? []
-			const fullCtx = makeCtx(pi, {
-				cwd,
-				ui: (ui ?? {}) as FakeCtxOptions["ui"],
-				modelRegistry: registry ?? pi.modelRegistry,
-			})
-			for (const h of list) await h({}, fullCtx)
-		},
-		async simulateToolCall(
-			toolName: string,
-			input: Record<string, unknown>,
-			ctx: object,
-		) {
-			const list = handlers.get("tool_call") ?? []
-			for (const h of list) {
-				const result = await h({ toolName, input }, ctx)
-				if (result !== undefined) return result
-			}
-			return undefined
-		},
-		async simulateCommand(name: string, args: string, ctx: object) {
-			const handler = commands.get(name)
-			if (!handler) throw new Error(`No command registered: ${name}`)
-			return handler(args, ctx)
-		},
-		async simulateShortcut(key: string, ctx: object) {
-			const handler = shortcuts.get(key)
-			if (!handler) throw new Error(`No shortcut registered: ${key}`)
-			return handler(ctx)
-		},
-	}
-	return pi
+interface MockPi {
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	on: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	registerCommand: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	registerShortcut: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	registerFlag: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	getActiveTools: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	setActiveTools: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	appendEntry: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	getFlag: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	sendUserMessage: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	sendMessage: any;
 }
 
-// Cast: we hand the fake pi to the extension factory which expects ExtensionAPI.
-// The shape matches the subset of methods the extension actually calls.
-function makeFakePiForExtension(p: FakePi) {
-	return p as unknown as Parameters<typeof permissionModesExtension>[0]
-}
-
-function makeCtx(
-	p: FakePi,
-	opts: FakeCtxOptions & {
-		modelRegistry?: { find: (provider: string, model: string) => unknown }
-	},
-) {
-	const ui = opts.ui ?? {}
+function makeContext(opts: { hasUI?: boolean } = {}): MockContext {
+	const theme = {
+		fg: (_role: string, text: string) => text,
+		dim: (text: string) => text,
+		bold: (text: string) => text,
+		strikethrough: (text: string) => text,
+		border: (text: string) => text,
+		borderMuted: (text: string) => text,
+	};
+	const ui: MockUI = {
+		select: vi.fn(async () => undefined),
+		confirm: vi.fn(async () => false),
+		input: vi.fn(async () => undefined),
+		editor: vi.fn(async () => undefined),
+		notify: vi.fn(),
+		setStatus: vi.fn(),
+		setWidget: vi.fn(),
+		setWorkingMessage: vi.fn(),
+		setWorkingIndicator: vi.fn(),
+		setFooter: vi.fn(),
+		custom: vi.fn(),
+		setTitle: vi.fn(),
+	};
+	void theme; // theme methods are stubbed inline in factory via ctx.ui.theme
 	return {
-		cwd: opts.cwd,
-		hasUI: !!opts.ui,
-		modelRegistry: opts.modelRegistry ?? p.modelRegistry,
-		ui: {
-			select: ui.select ?? (async () => "Block"),
-			notify: ui.notify ?? (() => {}),
-			editor: ui.editor ?? (async () => undefined),
-			setStatus: () => {},
-			setWidget: () => {},
-			setFooter: () => {},
-			setWorkingIndicator: () => {},
-			setWorkingMessage: () => {},
-			theme: {
-				fg: (_role: string, text: string) => text,
-				strikethrough: (t: string) => t,
-			},
-		},
+		hasUI: opts.hasUI ?? true,
+		mode: "tui",
+		cwd: "/home/user/project",
+		model: { provider: "anthropic", id: "claude-sonnet-4-5" },
+		ui,
 		sessionManager: {
-			getBranch: () => [],
-			getGitBranch: () => "",
-			getEntries: () => [],
+			getEntries: vi.fn(() => []),
+			getBranch: vi.fn(() => []),
+			getGitBranch: vi.fn(() => "main"),
 		},
-		model: undefined,
-	}
+		getContextUsage: vi.fn(() => undefined),
+		signal: undefined,
+	};
 }
 
-// ---- tests --------------------------------------------------------------
+function makePi(): { pi: MockPi; handlers: Map<string, AnyHandler[]>; commands: Map<string, AnyHandler>; shortcuts: Map<string, AnyHandler> } {
+	const handlers = new Map<string, AnyHandler[]>();
+	const commands = new Map<string, AnyHandler>();
+	const shortcuts = new Map<string, AnyHandler>();
 
-describe("permission-modes extension: tool_call gate", () => {
-	let pi: FakePi
-	let realProjectRoot: string
+	const pi: MockPi = {
+		on: vi.fn((event: string, handler: AnyHandler) => {
+			const list = handlers.get(event) ?? [];
+			list.push(handler);
+			handlers.set(event, list);
+		}),
+		registerCommand: vi.fn((name: string, def: { handler: AnyHandler }) => {
+			commands.set(name, def.handler);
+		}),
+		registerShortcut: vi.fn((key: string, def: { handler: AnyHandler }) => {
+			shortcuts.set(key, def.handler);
+		}),
+		registerFlag: vi.fn(),
+		getActiveTools: vi.fn(() => ["read", "bash", "edit", "write", "grep", "find", "ls"]),
+		setActiveTools: vi.fn(),
+		appendEntry: vi.fn(),
+		getFlag: vi.fn(() => "default"),
+		sendUserMessage: vi.fn(),
+		sendMessage: vi.fn(),
+	};
 
+	return { pi, handlers, commands, shortcuts };
+}
+
+/** Build a minimal ctx.ui.theme that supports fg/dim/bold/strikethrough/border. */
+function patchTheme(ctx: MockContext) {
+	// biome-ignore lint/suspicious/noExplicitAny: need a flexible mock type for theme
+	(ctx.ui as unknown as { theme: Record<string, any> }).theme = {
+		fg: (_role: string, t: string) => t,
+		dim: (t: string) => t,
+		bold: (t: string) => t,
+		strikethrough: (t: string) => t,
+		border: (t: string) => t,
+		borderMuted: (t: string) => t,
+	};
+}
+
+async function emit(handlers: Map<string, AnyHandler[]>, event: string, payload: unknown, ctx: unknown) {
+	const list = handlers.get(event) ?? [];
+	let result: unknown = undefined;
+	for (const h of list) {
+		const r = await h(payload, ctx);
+		if (r !== undefined) result = r;
+	}
+	return result;
+}
+
+// ---------- Setup ----------
+
+let pi: MockPi;
+let handlers: Map<string, AnyHandler[]>;
+let commands: Map<string, AnyHandler>;
+let shortcuts: Map<string, AnyHandler>;
+let ctx: MockContext;
+
+beforeEach(() => {
+	const env = makePi();
+	pi = env.pi;
+	handlers = env.handlers;
+	commands = env.commands;
+	shortcuts = env.shortcuts;
+	ctx = makeContext();
+	patchTheme(ctx);
+	factory(pi as unknown as Parameters<typeof factory>[0]);
+});
+
+afterEach(() => {
+	vi.clearAllMocks();
+});
+
+// ---------- Tests: registration ----------
+
+describe("registration", () => {
+	it("registers --permission-mode flag with default 'default'", () => {
+		expect(pi.registerFlag).toHaveBeenCalledWith(
+			"permission-mode",
+			expect.objectContaining({ type: "string", default: "default" }),
+		);
+	});
+
+	it("registers Shift+Tab shortcut", () => {
+		expect(shortcuts.has("shift+tab")).toBe(true);
+	});
+
+	it("registers /default, /plan, /auto, /mode, /auto-depth commands", () => {
+		expect(commands.has("default")).toBe(true);
+		expect(commands.has("plan")).toBe(true);
+		expect(commands.has("auto")).toBe(true);
+		expect(commands.has("mode")).toBe(true);
+		expect(commands.has("auto-depth")).toBe(true);
+	});
+
+	it("subscribes to tool_call, context, before_agent_start, turn_end, agent_end, session_start, session_tree, turn_start, before_provider_request, message_update", () => {
+		const events = pi.on.mock.calls.map((c: unknown[]) => c[0]);
+		for (const e of [
+			"tool_call",
+			"context",
+			"before_agent_start",
+			"turn_end",
+			"agent_end",
+			"session_start",
+			"session_tree",
+			"turn_start",
+			"before_provider_request",
+			"message_update",
+		]) {
+			expect(events).toContain(e);
+		}
+	});
+});
+
+// ---------- Tests: tool_call gate ----------
+
+describe("tool_call gate — default mode", () => {
 	beforeEach(async () => {
-		pi = createFakePi()
-		// Use real fs: the current repo IS a project (has package.json).
-		realProjectRoot = process.cwd()
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart(realProjectRoot)
-	})
+		await emit(handlers, "session_start", {}, ctx);
+	});
 
-	async function callToolCall(
-		toolName: string,
-		input: Record<string, unknown>,
-		ui?: FakeCtxOptions["ui"],
-	) {
-		const ctx = makeCtx(pi, {
-			cwd: realProjectRoot,
-			ui,
-		})
-		return pi.simulateToolCall(toolName, input, ctx)
-	}
+	it("passes read through", async () => {
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "read", input: { path: "/x" } },
+			ctx,
+		);
+		expect(r).toBeUndefined();
+	});
 
-	async function switchMode(mode: string) {
-		pi.flags["permission-mode"] = mode
-		await pi.simulateSessionStart(realProjectRoot)
-	}
+	it("passes safe bash through (no prompt)", async () => {
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "bash", input: { command: "git status" } },
+			ctx,
+		);
+		expect(r).toBeUndefined();
+		expect(ctx.ui.select).not.toHaveBeenCalled();
+	});
 
-	describe("ask mode", () => {
-		it("prompts on edit (inside cwd)", async () => {
-			await switchMode("ask")
-			const result = await callToolCall("edit", { path: "src/foo.ts" }, {
-				select: async () => "Block",
-			})
-			expect(result).toMatchObject({ block: true })
-		})
+	it("prompts for mutating bash and allows on 'Allow'", async () => {
+		ctx.ui.select.mockResolvedValueOnce("Allow");
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "bash", input: { command: "rm foo" } },
+			ctx,
+		);
+		expect(ctx.ui.select).toHaveBeenCalled();
+		expect(r).toBeUndefined();
+	});
 
-		it("auto-approves read (inside cwd)", async () => {
-			await switchMode("ask")
-			const result = await callToolCall("read", { path: "src/foo.ts" })
-			expect(result).toBeUndefined()
-		})
+	it("blocks mutating bash on 'Block'", async () => {
+		ctx.ui.select.mockResolvedValueOnce("Block");
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "bash", input: { command: "rm foo" } },
+			ctx,
+		);
+		expect(r).toMatchObject({ block: true });
+	});
 
-		it("prompts on read outside cwd", async () => {
-			await switchMode("ask")
-			const result = await callToolCall("read", { path: "/etc/passwd" })
-			expect(result).toMatchObject({ block: true })
-		})
+	it("prompts for edit and offers 'Allow all (enable auto)' option", async () => {
+		ctx.ui.select.mockResolvedValueOnce("Allow");
+		await emit(handlers, "tool_call", { toolName: "edit", input: { path: "/x" } }, ctx);
+		const choices = ctx.ui.select.mock.calls[0]?.[1] as string[];
+		expect(choices).toContain("Allow all (enable auto)");
+	});
 
-		it("auto-approves safe bash", async () => {
-			await switchMode("ask")
-			const result = await callToolCall("bash", { command: "ls -la" })
-			expect(result).toBeUndefined()
-		})
+	it("'Allow all (enable auto)' switches to auto mode and allows the call", async () => {
+		ctx.ui.select.mockResolvedValueOnce("Allow all (enable auto)");
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "edit", input: { path: "/x" } },
+			ctx,
+		);
+		expect(r).toBeUndefined();
+		// After the call, a subsequent edit should pass through with no prompt
+		ctx.ui.select.mockClear();
+		const r2 = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "write", input: { path: "/y" } },
+			ctx,
+		);
+		expect(r2).toBeUndefined();
+		expect(ctx.ui.select).not.toHaveBeenCalled();
+	});
 
-		it("prompts on destructive bash", async () => {
-			await switchMode("ask")
-			const result = await callToolCall("bash", { command: "rm -rf /" }, {
-				select: async () => "Block",
-			})
-			expect(result).toMatchObject({ block: true })
-		})
+	it("blocks edit when no UI is available", async () => {
+		const headless = makeContext({ hasUI: false });
+		patchTheme(headless);
+		await emit(handlers, "session_start", {}, headless);
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "edit", input: { path: "/x" } },
+			headless,
+		);
+		expect(r).toMatchObject({ block: true });
+		expect(headless.ui.select).not.toHaveBeenCalled();
+	});
 
-		it("prompts on grep outside cwd", async () => {
-			await switchMode("ask")
-			const result = await callToolCall("grep", { path: "/etc/hosts" })
-			expect(result).toMatchObject({ block: true })
-		})
+	it("blocks mutating bash when no UI is available", async () => {
+		const headless = makeContext({ hasUI: false });
+		patchTheme(headless);
+		await emit(handlers, "session_start", {}, headless);
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "bash", input: { command: "rm foo" } },
+			headless,
+		);
+		expect(r).toMatchObject({ block: true });
+	});
+});
 
-		it("auto-approves grep inside cwd", async () => {
-			await switchMode("ask")
-			const result = await callToolCall("grep", { path: "src/foo.ts" })
-			expect(result).toBeUndefined()
-		})
-	})
+describe("tool_call gate — plan mode", () => {
+	beforeEach(async () => {
+		await emit(handlers, "session_start", {}, ctx);
+		await commands.get("plan")!([], ctx);
+	});
 
-	describe("plan mode", () => {
-		it("blocks edit (defensive — tool is also stripped via setActiveTools)", async () => {
-			await switchMode("plan")
-			const result = await callToolCall("edit", { path: "src/foo.ts" })
-			expect(result).toMatchObject({ block: true })
-		})
+	it("blocks edit and write defensively", async () => {
+		const r1 = await emit(handlers, "tool_call", { toolName: "edit", input: { path: "/x" } }, ctx);
+		const r2 = await emit(handlers, "tool_call", { toolName: "write", input: { path: "/y" } }, ctx);
+		expect(r1).toMatchObject({ block: true });
+		expect(r2).toMatchObject({ block: true });
+	});
 
-		it("auto-approves read", async () => {
-			await switchMode("plan")
-			const result = await callToolCall("read", { path: "src/foo.ts" })
-			expect(result).toBeUndefined()
-		})
+	it("blocks mutating bash (rm)", async () => {
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "bash", input: { command: "rm foo" } },
+			ctx,
+		);
+		expect(r).toMatchObject({ block: true });
+	});
 
-		it("auto-approves safe bash", async () => {
-			await switchMode("plan")
-			const result = await callToolCall("bash", { command: "ls" })
-			expect(result).toBeUndefined()
-		})
+	it("allows read-only bash (git status)", async () => {
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "bash", input: { command: "git status" } },
+			ctx,
+		);
+		expect(r).toBeUndefined();
+	});
 
-		it("blocks destructive bash", async () => {
-			await switchMode("plan")
-			const result = await callToolCall("bash", { command: "rm -rf /" })
-			expect(result).toMatchObject({ block: true })
-		})
-	})
+	it("strips edit/write from active tools on plan entry", () => {
+		// setActiveTools should have been called with a list that lacks "edit" and "write"
+		const calls = (pi.setActiveTools as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+		// Find the call that was made when entering plan
+		const planEntryCall = calls.find((c) => {
+			const list = c[0] as string[] | undefined;
+			return Array.isArray(list) && list.includes("read") && list.includes("bash");
+		});
+		expect(planEntryCall).toBeDefined();
+		const planTools = planEntryCall![0] as string[];
+		expect(planTools).not.toContain("edit");
+		expect(planTools).not.toContain("write");
+	});
 
+	it("restores edit/write on exit from plan mode", async () => {
+		pi.setActiveTools.mockClear();
+		await commands.get("default")!([], ctx);
+		const restoreCall = (pi.setActiveTools as unknown as { mock: { calls: unknown[][] } }).mock.calls.find(
+			(c) => Array.isArray(c[0]) && (c[0] as string[]).includes("edit"),
+		);
+		expect(restoreCall).toBeDefined();
+	});
+});
 
+describe("tool_call gate — auto mode", () => {
+	beforeEach(async () => {
+		await emit(handlers, "session_start", {}, ctx);
+		await commands.get("auto")!([], ctx);
+		ctx.ui.select.mockClear();
+	});
 
-	describe("auto mode", () => {
-		it("auto-approves edit inside cwd", async () => {
-			await switchMode("auto")
-			const result = await callToolCall("edit", { path: "src/foo.ts" })
-			expect(result).toBeUndefined()
-		})
+	it("auto-approves edit without prompting", async () => {
+		const r = await emit(handlers, "tool_call", { toolName: "edit", input: { path: "/x" } }, ctx);
+		expect(r).toBeUndefined();
+		expect(ctx.ui.select).not.toHaveBeenCalled();
+	});
 
-		it("auto-approves edit outside cwd but inside project (relaxed)", async () => {
-			await switchMode("auto")
-			// cwd = realProjectRoot. We treat the repo as the project, and target
-			// a path within it (which is by definition inside cwd → not outside → no prompt).
-			// To exercise the relaxation we'd need a sub-cwd, which our fake doesn't easily set up.
-			// Instead, assert the simpler invariant: in auto mode, in-cwd edits never prompt.
-			const result = await callToolCall("edit", { path: "src/foo.ts" })
-			expect(result).toBeUndefined()
-		})
+	it("auto-approves mutating bash without prompting", async () => {
+		const r = await emit(
+			handlers,
+			"tool_call",
+			{ toolName: "bash", input: { command: "rm foo" } },
+			ctx,
+		);
+		expect(r).toBeUndefined();
+		expect(ctx.ui.select).not.toHaveBeenCalled();
+	});
+});
 
-		it("auto-approves bash destructive (inside cwd)", async () => {
-			await switchMode("auto")
-			const result = await callToolCall("bash", { command: "rm -rf ./build" })
-			expect(result).toBeUndefined()
-		})
+// ---------- Tests: Shift+Tab cycle ----------
 
-		it("auto-approves read anywhere", async () => {
-			await switchMode("auto")
-			const result = await callToolCall("read", { path: "/etc/passwd" })
-			expect(result).toBeUndefined()
-		})
-	})
-})
+describe("Shift+Tab cycle", () => {
+	beforeEach(async () => {
+		await emit(handlers, "session_start", {}, ctx);
+		ctx.ui.notify.mockClear();
+	});
 
-describe("permission-modes extension: auto follow-up", () => {
-	let pi: FakePi
+	it("default → plan → auto → default", async () => {
+		await shortcuts.get("shift+tab")!(ctx);
+		expect(ctx.ui.notify).toHaveBeenLastCalledWith("Mode: plan", "info");
 
-	beforeEach(() => {
-		pi = createFakePi()
-	})
+		await shortcuts.get("shift+tab")!(ctx);
+		expect(ctx.ui.notify).toHaveBeenLastCalledWith("Mode: auto", "info");
 
-	async function simulateTurnEnd(message: unknown) {
-		const list = pi.handlers.get("turn_end") ?? []
-		for (const h of list) {
-			await h({ message }, makeCtx(pi, { cwd: "/home/user/project/src" }))
-		}
-	}
+		await shortcuts.get("shift+tab")!(ctx);
+		expect(ctx.ui.notify).toHaveBeenLastCalledWith("Mode: default", "info");
+	});
+});
 
-	it("sends follow-up in auto mode when assistant turn has tool calls and no completion signal", async () => {
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		pi.flags["permission-mode"] = "auto"
-		await pi.simulateSessionStart("/home/user/project/src")
+// ---------- Tests: /mode command ----------
 
-		await simulateTurnEnd({
-			role: "assistant",
-			content: [
-				{ type: "text", text: "Working on step 2 now." },
-				{ type: "toolCall", name: "bash", input: { command: "ls" } },
-			],
-		})
+describe("/mode command", () => {
+	beforeEach(async () => {
+		await emit(handlers, "session_start", {}, ctx);
+	});
 
-		expect(pi.userMessages.length).toBe(1)
-		expect(pi.userMessages[0].text).toContain("Auto mode is active")
-		expect((pi.userMessages[0].opts as { deliverAs?: string })?.deliverAs).toBe(
-			"followUp",
-		)
-	})
+	it("/mode with no arg opens a selector", async () => {
+		ctx.ui.select.mockResolvedValueOnce("plan");
+		await commands.get("mode")!("", ctx);
+		expect(ctx.ui.select).toHaveBeenCalled();
+	});
 
-	it("does NOT send follow-up when text is a completion signal", async () => {
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		pi.flags["permission-mode"] = "auto"
-		await pi.simulateSessionStart("/home/user/project/src")
+	it("/mode plan switches directly", async () => {
+		await commands.get("mode")!("plan", ctx);
+		const r = await emit(handlers, "tool_call", { toolName: "edit", input: { path: "/x" } }, ctx);
+		expect(r).toMatchObject({ block: true });
+	});
 
-		await simulateTurnEnd({
-			role: "assistant",
-			content: [
-				{ type: "text", text: "Task is complete." },
-				{ type: "toolCall", name: "bash", input: { command: "ls" } },
-			],
-		})
+	it("/mode with unknown arg notifies error", async () => {
+		await commands.get("mode")!("garbage", ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Unknown mode"), "error");
+	});
 
-		expect(pi.userMessages.length).toBe(0)
-	})
+	it("/mode with no arg in headless mode just shows current mode", async () => {
+		const headless = makeContext({ hasUI: false });
+		patchTheme(headless);
+		await emit(handlers, "session_start", {}, headless);
+		await commands.get("mode")!("", headless);
+		expect(headless.ui.notify).toHaveBeenCalledWith("Mode: default");
+	});
+});
 
-	it("does NOT send follow-up in ask mode", async () => {
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
+// ---------- Tests: /auto-depth ----------
 
-		await simulateTurnEnd({
-			role: "assistant",
-			content: [
-				{ type: "text", text: "Working..." },
-				{ type: "toolCall", name: "bash", input: { command: "ls" } },
-			],
-		})
+describe("/auto-depth command", () => {
+	beforeEach(async () => {
+		await emit(handlers, "session_start", {}, ctx);
+	});
 
-		expect(pi.userMessages.length).toBe(0)
-	})
+	it("sets the cap and persists", async () => {
+		await commands.get("auto-depth")!("5", ctx);
+		expect(pi.appendEntry).toHaveBeenCalled();
+		expect(ctx.ui.notify).toHaveBeenCalledWith("auto-follow-up depth set to 5", "info");
+	});
 
-	it("does NOT send follow-up when no tool calls in turn", async () => {
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		pi.flags["permission-mode"] = "auto"
-		await pi.simulateSessionStart("/home/user/project/src")
+	it("with no arg shows current depth", async () => {
+		await commands.get("auto-depth")!("", ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("auto-follow-up depth"), "info");
+	});
 
-		await simulateTurnEnd({
-			role: "assistant",
-			content: [{ type: "text", text: "Just thinking." }],
-		})
+	it("rejects negative", async () => {
+		await commands.get("auto-depth")!("-1", ctx);
+		// Should fall through to "show" branch
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("auto-follow-up depth"), "info");
+	});
 
-		expect(pi.userMessages.length).toBe(0)
-	})
+	it("accepts 0 for unlimited", async () => {
+		await commands.get("auto-depth")!("0", ctx);
+		expect(ctx.ui.notify).toHaveBeenCalledWith("auto-follow-up depth set to 0", "info");
+	});
+});
 
-	it("does NOT send follow-up when depth limit reached", async () => {
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		pi.flags["permission-mode"] = "auto"
-		await pi.simulateSessionStart("/home/user/project/src")
+// ---------- Tests: context dedup ----------
 
-		// Manually push count to limit via the persisted entry: tricky in this stub.
-		// Instead, just verify the default depth (20) allows up to 20 follow-ups.
-		// Send 21 turns and assert the 21st gets nothing.
-		const turn = {
-			role: "assistant",
-			content: [
-				{ type: "text", text: "Working." },
-				{ type: "toolCall", name: "bash", input: { command: "ls" } },
-			],
-		}
-		// Each turn: agent_end (resets isStepping) then turn_end (sends follow-up if !stepping)
-		const agentEndList = pi.handlers.get("agent_end") ?? []
-		for (let i = 0; i < 25; i++) {
-			for (const h of agentEndList) await h({ messages: [] }, makeCtx(pi, { cwd: "/home/user/project/src" }))
-			await simulateTurnEnd(turn)
-		}
-		expect(pi.userMessages.length).toBe(20)
-	})
+describe("context dedup", () => {
+	it("keeps only the latest modes-context message", async () => {
+		const messages = [
+			{ role: "user", content: "hello", customType: "modes-context" },
+			{ role: "assistant", content: [{ type: "text", text: "hi" }] },
+			{ role: "user", content: "second", customType: "modes-context" },
+			{ role: "user", content: "third", customType: "modes-context" },
+		];
+		const r = await emit(handlers, "context", { messages }, ctx);
+		const out = (r as { messages: unknown[] }).messages;
+		const kept = out.filter((m) => (m as { customType?: string }).customType === "modes-context");
+		expect(kept).toHaveLength(1);
+		// In the filtered output, the kept message is the last modes-context
+		expect(kept[0]).toBe(messages[3]);
+	});
+});
 
-	it("resets follow-up count when mode switches", async () => {
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		pi.flags["permission-mode"] = "auto"
-		await pi.simulateSessionStart("/home/user/project/src")
+// ---------- Tests: before_agent_start injection ----------
 
-		const turn = {
-			role: "assistant",
-			content: [
-				{ type: "text", text: "Working." },
-				{ type: "toolCall", name: "bash", input: { command: "ls" } },
-			],
-		}
-		const agentEndList = pi.handlers.get("agent_end") ?? []
-		for (let i = 0; i < 5; i++) {
-			for (const h of agentEndList) await h({ messages: [] }, makeCtx(pi, { cwd: "/home/user/project/src" }))
-			await simulateTurnEnd(turn)
-		}
-		expect(pi.userMessages.length).toBe(5)
+describe("before_agent_start", () => {
+	beforeEach(async () => {
+		await emit(handlers, "session_start", {}, ctx);
+	});
 
-		// Switch to ask → count resets
-		pi.flags["permission-mode"] = "ask"
-		await pi.simulateSessionStart("/home/user/project/src")
+	it("injects a default-mode context message", async () => {
+		const r = await emit(handlers, "before_agent_start", { prompt: "hi", systemPrompt: "x" }, ctx);
+		const msg = (r as { message: { customType: string; display: boolean; content: string } }).message;
+		expect(msg.customType).toBe("modes-context");
+		expect(msg.display).toBe(false);
+		expect(msg.content).toContain("DEFAULT MODE ACTIVE");
+	});
 
-		// Switch back to auto → count starts at 0
-		pi.flags["permission-mode"] = "auto"
-		await pi.simulateSessionStart("/home/user/project/src")
-		for (let i = 0; i < 3; i++) {
-			for (const h of agentEndList) await h({ messages: [] }, makeCtx(pi, { cwd: "/home/user/project/src" }))
-			await simulateTurnEnd(turn)
-		}
-		expect(pi.userMessages.length).toBe(8) // 5 + 3
-	})
+	it("injects a plan-mode context message", async () => {
+		await commands.get("plan")!([], ctx);
+		const r = await emit(handlers, "before_agent_start", { prompt: "hi", systemPrompt: "x" }, ctx);
+		const msg = (r as { message: { content: string } }).message;
+		expect(msg.content).toContain("PLAN MODE ACTIVE");
+	});
 
-	it("does NOT crash when sendUserMessage throws (followUp unavailable)", async () => {
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		pi.flags["permission-mode"] = "auto"
-		await pi.simulateSessionStart("/home/user/project/src")
+	it("injects an auto-mode context message", async () => {
+		await commands.get("auto")!([], ctx);
+		const r = await emit(handlers, "before_agent_start", { prompt: "hi", systemPrompt: "x" }, ctx);
+		const msg = (r as { message: { content: string } }).message;
+		expect(msg.content).toContain("AUTO MODE ACTIVE");
+	});
+});
 
-		// Replace sendUserMessage with one that throws
-		const originalSendUserMessage = pi.sendUserMessage
-		pi.sendUserMessage = () => {
-			throw new Error("followUp delivery not supported")
-		}
-		const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {})
+// ---------- Tests: session_start restore ----------
 
-		// Should not throw
-		await simulateTurnEnd({
-			role: "assistant",
-			content: [
-				{ type: "text", text: "Working." },
-				{ type: "toolCall", name: "bash", input: { command: "ls" } },
-			],
-		})
+describe("session_start restore", () => {
+	it("uses --permission-mode flag when no persisted entry exists", async () => {
+		(pi.getFlag as unknown as { mockReturnValue: (v: string) => void }).mockReturnValue("plan");
+		await emit(handlers, "session_start", {}, ctx);
+		const r = await emit(handlers, "tool_call", { toolName: "edit", input: { path: "/x" } }, ctx);
+		expect(r).toMatchObject({ block: true });
+	});
 
-		expect(consoleSpy).toHaveBeenCalled()
-		consoleSpy.mockRestore()
-		pi.sendUserMessage = originalSendUserMessage
-	})
-})
-
-// ---- model profile tests -----------------------------------------------
-//
-// Profile helpers live in profiles.ts (unit-tested in profiles.test.ts).
-// These integration tests verify the wiring between profiles.ts and
-// index.ts: session-start flag, command handlers, mode-switch hook,
-// session-restore, and persistence.
-
-describe("permission-modes extension: model profiles", () => {
-	let pi: FakePi
-
-	beforeEach(() => {
-		pi = createFakePi()
-	})
-
-	function setupProfile(cfg: unknown) {
-		const fs = require("node:fs") as typeof import("node:fs")
-		const path = require("node:path") as typeof import("node:path")
-		const tmp = path.join(
-			"/tmp",
-			`pm-int-mp-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`,
-		)
-		setModelsPath(tmp)
-		fs.writeFileSync(tmp, JSON.stringify(cfg))
-		return tmp
-	}
-
-	it("ensureModelProfilesConfig runs on session_start and persists activeProfile in entry", async () => {
-		setupProfile({
-			active: "main",
-			main: { ask: "p1/a" },
-		})
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		// After session_start with no flag, persistState is not yet called.
-		// Trigger a mode switch to force persist.
-		await pi.simulateCommand("auto", "", makeCtx(pi, { cwd: "/home/user/project/src" }))
-		const last = pi.appendEntries[pi.appendEntries.length - 1]
-		expect(last.type).toBe("modes")
-		expect((last.data as any).currentMode).toBe("auto")
-	})
-
-	it("applyProfileModelForMode switches model when profile is active and mapping exists", async () => {
-		setupProfile({
-			active: "main",
-			main: { ask: "prov1/askModel", plan: "prov1/planModel", auto: "prov1/autoModel" },
-		})
-		const fakeModel = { id: "askModel" }
-		pi.flags["model-profile"] = "main"
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src", undefined, {
-			find: (provider: string, model: string) => {
-				if (provider === "prov1" && model === "askModel") return fakeModel
-				return undefined
-			},
-		})
-		expect(pi.setModelCalls.length).toBeGreaterThan(0)
-		expect(pi.setModelCalls[0].model).toBe(fakeModel)
-	})
-
-	it("applyProfileModelForMode warns (not crashes) when model is not in registry", async () => {
-		setupProfile({
-			active: "main",
-			main: { ask: "missing/missing" },
-		})
-		pi.flags["model-profile"] = "main"
-		const notifs: string[] = []
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src", {
-			notify: (m: string) => notifs.push(m),
-			select: async () => "Block",
-		}, {
-			find: () => undefined,
-		})
-		expect(pi.setModelCalls.length).toBe(0)
-		expect(notifs.some((n) => /not found/i.test(n))).toBe(true)
-	})
-
-	it("applyProfileModelForMode warns when setModel returns false (no API key)", async () => {
-		setupProfile({
-			active: "main",
-			main: { ask: "prov1/askModel" },
-		})
-		pi.flags["model-profile"] = "main"
-		// Override setModel to return false (simulates missing API key)
-		const fakePi = pi as unknown as { setModel: (m: unknown) => Promise<boolean> }
-		const originalSetModel = fakePi.setModel
-		fakePi.setModel = async () => false
-		const notifs: string[] = []
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src", {
-			notify: (m: string) => notifs.push(m),
-			select: async () => "Block",
-		}, {
-			find: () => ({ id: "askModel" }),
-		})
-		expect(pi.setModelCalls.length).toBe(0)
-		expect(notifs.some((n) => /api key|no api/i.test(n))).toBe(true)
-		fakePi.setModel = originalSetModel
-	})
-
-	it("setMode re-applies the model when profile is active", async () => {
-		setupProfile({
-			active: "main",
-			main: { ask: "p/askM", plan: "p/planM", auto: "p/autoM" },
-		})
-		const fakeModels: Record<string, unknown> = {
-			askM: { id: "askM" },
-			planM: { id: "planM" },
-			autoM: { id: "autoM" },
-		}
-		const registry = {
-			find: (_provider: string, model: string) => fakeModels[model],
-		}
-		pi.flags["model-profile"] = "main"
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src", undefined, registry)
-		const initialCalls = pi.setModelCalls.length
-		// Switch mode → should re-resolve and call setModel for the new mode's mapping.
-		await pi.simulateCommand(
-			"plan",
-			"",
-			makeCtx(pi, { cwd: "/home/user/project/src", modelRegistry: registry }),
-		)
-		expect(pi.setModelCalls.length).toBe(initialCalls + 1)
-		expect(pi.setModelCalls[pi.setModelCalls.length - 1].model).toEqual({
-			id: "planM",
-		})
-	})
-
-	it("activeProfile is persisted in the modes entry after a profile switch", async () => {
-		setupProfile({
-			active: "alpha",
-			alpha: { ask: "p/a" },
-			beta: { ask: "p/b" },
-		})
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		// Activate beta via /model-profile beta
-		await pi.simulateCommand(
-			"model-profile",
-			"beta",
-			makeCtx(pi, { cwd: "/home/user/project/src" }),
-		)
-		const last = pi.appendEntries[pi.appendEntries.length - 1]
-		expect((last.data as any).activeProfile).toBe("beta")
-	})
-
-	it("session restore re-applies the persisted profile's model", async () => {
-		setupProfile({
-			active: "main",
-			main: { ask: "prov1/askModel", plan: "prov1/planModel", auto: "prov1/autoModel" },
-		})
-		const fakeModel = { id: "planModel" }
-		const entries = [
+	it("persisted entry overrides flag (auto wins over default flag)", async () => {
+		(pi.getFlag as unknown as { mockReturnValue: (v: string) => void }).mockReturnValue("default");
+		ctx.sessionManager.getEntries.mockReturnValue([
 			{
 				type: "custom",
 				customType: "modes",
-				data: { currentMode: "plan", autoFollowUpDepth: 20, activeProfile: "main" },
+				data: { currentMode: "auto", autoFollowUpDepth: 5 },
 			},
-		]
-		permissionModesExtension(makeFakePiForExtension(pi))
-		const list = pi.handlers.get("session_start") ?? []
-		for (const h of list) {
-			await h(
-				{},
-				{
-					cwd: "/home/user/project/src",
-					hasUI: false,
-					modelRegistry: {
-						find: (provider: string, model: string) =>
-							provider === "prov1" && model === "planModel"
-								? fakeModel
-								: undefined,
-					},
-					sessionManager: {
-						getBranch: () => entries,
-						getGitBranch: () => "",
-						getEntries: () => entries,
-					},
-				},
-			)
-		}
-		expect(pi.setModelCalls.some((c) => c.model === fakeModel)).toBe(true)
-	})
+		]);
+		await emit(handlers, "session_start", {}, ctx);
+		// Now an edit should pass without prompt (we're in auto)
+		const r = await emit(handlers, "tool_call", { toolName: "edit", input: { path: "/x" } }, ctx);
+		expect(r).toBeUndefined();
+	});
 
-	it("/model-profile list formats and sends a message", async () => {
-		setupProfile({
-			active: "main",
-			main: { ask: "p/a", plan: "p/p", auto: "p/au" },
-			alt: { ask: "p2/a" },
-		})
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		await pi.simulateCommand(
-			"model-profile",
-			"list",
-			makeCtx(pi, { cwd: "/home/user/project/src" }),
-		)
-		expect(pi.sentMessages.length).toBe(1)
-		const content = String(pi.sentMessages[0].message.content ?? "")
-		expect(content).toMatch(/main/)
-		expect(content).toMatch(/alt/)
-	})
+	it("maps legacy 'ask' to default", async () => {
+		(pi.getFlag as unknown as { mockReturnValue: (v: string) => void }).mockReturnValue("ask");
+		await emit(handlers, "session_start", {}, ctx);
+		// Edit should prompt (default mode)
+		ctx.ui.select.mockResolvedValueOnce("Allow");
+		const r = await emit(handlers, "tool_call", { toolName: "edit", input: { path: "/x" } }, ctx);
+		expect(ctx.ui.select).toHaveBeenCalled();
+		expect(r).toBeUndefined();
+	});
 
-	it("/model-profile <unknown> shows an 'Unknown profile' notification", async () => {
-		setupProfile({ active: "main", main: { ask: "p/a" } })
-		const notifs: string[] = []
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src", {
-			notify: (m: string) => notifs.push(m),
-			select: async () => "Block",
-		})
-		await pi.simulateCommand(
-			"model-profile",
-			"nonexistent",
-			makeCtx(pi, {
-				cwd: "/home/user/project/src",
-				ui: {
-					notify: (m: string) => notifs.push(m),
-					select: async () => "Block",
-				},
-			}),
-		)
-		expect(notifs.some((n) => /unknown profile/i.test(n))).toBe(true)
-	})
+	it("maps legacy 'accept-edits' to auto", async () => {
+		(pi.getFlag as unknown as { mockReturnValue: (v: string) => void }).mockReturnValue("accept-edits");
+		await emit(handlers, "session_start", {}, ctx);
+		const r = await emit(handlers, "tool_call", { toolName: "edit", input: { path: "/x" } }, ctx);
+		expect(r).toBeUndefined();
+	});
+});
 
-	it("/model-profile with no args shows a selector and activates the chosen profile", async () => {
-		setupProfile({
-			active: "main",
-			main: { ask: "p/a" },
-			alt: { ask: "p2/a" },
-		})
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		await pi.simulateCommand(
-			"model-profile",
-			"",
-			makeCtx(pi, {
-				cwd: "/home/user/project/src",
-				ui: {
-					select: async (_label: string, options: string[]) =>
-						options.includes("alt") ? "alt" : options[0],
-					notify: () => {},
-				},
-			}),
-		)
-		const last = pi.appendEntries[pi.appendEntries.length - 1]
-		expect((last.data as any).activeProfile).toBe("alt")
-	})
-})
+// ---------- Tests: auto-follow-up ----------
 
-// ---- Alt+I: cycle profile shortcut --------------------------------------
-//
-// Verifies the registered shortcut advances the active profile by one, wraps
-// around, notifies the user, and re-applies the model mapping for the
-// current mode.
-
-describe("permission-modes extension: Alt+I cycle profile shortcut", () => {
-	let pi: FakePi
-
-	beforeEach(() => {
-		pi = createFakePi()
-	})
-
-	function setupProfile(cfg: unknown) {
-		const fs = require("node:fs") as typeof import("node:fs")
-		const path = require("node:path") as typeof import("node:path")
-		const tmp = path.join(
-			"/tmp",
-			`pm-int-cyc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`,
-		)
-		setModelsPath(tmp)
-		fs.writeFileSync(tmp, JSON.stringify(cfg))
-		return tmp
-	}
-
-	it("registers the alt+i shortcut", () => {
-		permissionModesExtension(makeFakePiForExtension(pi))
-		expect(pi.shortcuts.has("alt+i")).toBe(true)
-	})
-
-	it("advances the active profile to the next one and persists the change", async () => {
-		setupProfile({
-			active: "alpha",
-			alpha: { ask: "p/a" },
-			beta: { ask: "p/b" },
-			gamma: { ask: "p/g" },
-		})
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		// Start active at 'alpha' (from config.active). Cycle should land on 'beta'.
-		await pi.simulateShortcut(
-			"alt+i",
-			makeCtx(pi, {
-				cwd: "/home/user/project/src",
-				ui: { notify: () => {}, select: async () => "Block" },
-			}),
-		)
-		const last = pi.appendEntries[pi.appendEntries.length - 1]
-		expect((last.data as any).activeProfile).toBe("beta")
-	})
-
-	it("wraps from the last profile back to the first", async () => {
-		setupProfile({
-			active: "gamma",
-			alpha: { ask: "p/a" },
-			beta: { ask: "p/b" },
-			gamma: { ask: "p/g" },
-		})
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		await pi.simulateShortcut(
-			"alt+i",
-			makeCtx(pi, {
-				cwd: "/home/user/project/src",
-				ui: { notify: () => {}, select: async () => "Block" },
-			}),
-		)
-		const last = pi.appendEntries[pi.appendEntries.length - 1]
-		expect((last.data as any).activeProfile).toBe("alpha")
-	})
-
-	it("uses default profile as starting point when no profile is active", async () => {
-		setupProfile({
-			active: "main",
-			main: { ask: "p/a" },
-			alt: { ask: "p2/a" },
-		})
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src")
-		// activeProfile is undefined until set explicitly. Cycle should still
-		// advance: it should land on the profile AFTER the implicit
-		// getActiveProfileName() (which is "main"), so → "alt".
-		await pi.simulateShortcut(
-			"alt+i",
-			makeCtx(pi, {
-				cwd: "/home/user/project/src",
-				ui: { notify: () => {}, select: async () => "Block" },
-			}),
-		)
-		const last = pi.appendEntries[pi.appendEntries.length - 1]
-		expect((last.data as any).activeProfile).toBe("alt")
-	})
-
-	it("warns when no profiles exist in the config", async () => {
-		setupProfile({})
-		const notifs: string[] = []
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src", {
-			notify: (m: string) => notifs.push(m),
-			select: async () => "Block",
-		})
-		await pi.simulateShortcut(
-			"alt+i",
-			makeCtx(pi, {
-				cwd: "/home/user/project/src",
-				ui: {
-					notify: (m: string) => notifs.push(m),
-					select: async () => "Block",
-				},
-			}),
-		)
-		expect(notifs.some((n) => /no profiles/i.test(n))).toBe(true)
-	})
-
-	it("re-applies the model mapping for the current mode after cycling", async () => {
-		setupProfile({
-			active: "alpha",
-			alpha: { ask: "p/askA" },
-			beta: { ask: "p/askB" },
-		})
-		const fakeModels: Record<string, unknown> = {
-			askA: { id: "askA" },
-			askB: { id: "askB" },
-		}
-		const registry = {
-			find: (_provider: string, model: string) => fakeModels[model],
-		}
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src", undefined, registry)
-		// Force activation so the call to setActiveProfile re-resolves the model.
-		await pi.simulateShortcut(
-			"alt+i",
-			makeCtx(pi, {
-				cwd: "/home/user/project/src",
-				ui: { notify: () => {}, select: async () => "Block" },
-				modelRegistry: registry,
-			}),
-		)
-		// The last setModel call should be for askB (the new profile's mapping
-		// for the ask mode we start in).
-		const last = pi.setModelCalls[pi.setModelCalls.length - 1]
-		expect(last.model).toEqual({ id: "askB" })
-	})
-
-	it("notifies with the newly-activated profile name", async () => {
-		setupProfile({
-			active: "alpha",
-			alpha: { ask: "p/a" },
-			beta: { ask: "p/b" },
-		})
-		const notifs: string[] = []
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart("/home/user/project/src", {
-			notify: (m: string) => notifs.push(m),
-			select: async () => "Block",
-		})
-		await pi.simulateShortcut(
-			"alt+i",
-			makeCtx(pi, {
-				cwd: "/home/user/project/src",
-				ui: {
-					notify: (m: string) => notifs.push(m),
-					select: async () => "Block",
-				},
-			}),
-		)
-		expect(notifs.some((n) => /profile.*beta.*activated/i.test(n))).toBe(true)
-	})
-})
-describe("auto mode: outside-cwd write tracking", () => {
-	let pi: FakePi
-	let realProjectRoot: string
-	let outsideTmpDir: string
-	let outsideFile: string
-
-	async function switchMode(mode: string) {
-		pi.flags["permission-mode"] = mode
-		await pi.simulateSessionStart(realProjectRoot)
+describe("auto-follow-up", () => {
+	function assistantWithToolCall(text: string) {
+		return {
+			message: {
+				role: "assistant",
+				content: [
+					{ type: "text", text },
+					{ type: "toolCall", id: "t1", name: "bash", arguments: { command: "ls" } },
+				],
+			},
+		};
 	}
 
 	beforeEach(async () => {
-		pi = createFakePi()
-		// Use real fs: the current repo IS a project (has package.json).
-		realProjectRoot = process.cwd()
-		outsideTmpDir = mkdtempSync(join(tmpdir(), "pm-outside-"))
-		outsideFile = join(outsideTmpDir, "test.txt")
-		permissionModesExtension(makeFakePiForExtension(pi))
-		await pi.simulateSessionStart(realProjectRoot)
-	})
+		await emit(handlers, "session_start", {}, ctx);
+		await commands.get("auto")!([], ctx);
+		await commands.get("auto-depth")!("3", ctx);
+		pi.sendUserMessage.mockClear();
+	});
 
-	afterEach(() => {
-		// Clean up any .pi/ artifacts created in realProjectRoot
-		const tmpDir = join(realProjectRoot, ".pi", "projects")
-		if (existsSync(tmpDir)) rmSync(tmpDir, { recursive: true, force: true })
-		rmSync(outsideTmpDir, { recursive: true, force: true })
-	})
+	it("sends a follow-up when assistant made tool calls and no completion signal", async () => {
+		await emit(handlers, "turn_end", assistantWithToolCall("Working on it..."), ctx);
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"Continue. Auto mode is active — proceed without asking.",
+			{ deliverAs: "followUp" },
+		);
+	});
 
-	it("auto-approves write outside cwd (no prompt)", async () => {
-		await switchMode("auto")
-		const ctx = makeCtx(pi, { cwd: realProjectRoot })
-		const result = await pi.simulateToolCall("write", { path: outsideFile }, ctx)
-		expect(result).toBeUndefined()
-	})
+	it("does NOT follow up when assistant text is a completion signal", async () => {
+		await emit(handlers, "turn_end", assistantWithToolCall("All done."), ctx);
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
 
-	it("captures backup content of existing file before writing", async () => {
-		writeFileSync(outsideFile, "ORIGINAL")
-		await switchMode("auto")
-		const ctx = makeCtx(pi, { cwd: realProjectRoot })
-		// Write tool_call happens BEFORE the tool actually runs in real pi;
-		// in our fake we just call the handler. So pre-write content is "ORIGINAL".
-		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
-		// Snapshot must exist
-		const snaps = listTrackedOutsideWrites(realProjectRoot)
-		expect(snaps).toHaveLength(1)
-		expect(snaps[0].originalPath).toBe(outsideFile)
-		expect(snaps[0].backupContent).toBe("ORIGINAL")
-		expect(snaps[0].toolName).toBe("write")
-	})
-
-	it("tracks null backup when file did not exist before write", async () => {
-		await switchMode("auto")
-		const ctx = makeCtx(pi, { cwd: realProjectRoot })
-		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
-		const snaps = listTrackedOutsideWrites(realProjectRoot)
-		expect(snaps[0].backupContent).toBeNull()
-	})
-
-	it("stacks snapshots when same path is written twice", async () => {
-		writeFileSync(outsideFile, "FIRST_ORIGINAL")
-		await switchMode("auto")
-		const ctx = makeCtx(pi, { cwd: realProjectRoot })
-		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
-		// The snapshot captures pre-write content
-		const snap1 = listTrackedOutsideWrites(realProjectRoot)[0]
-		expect(snap1.backupContent).toBe("FIRST_ORIGINAL")
-
-		// Second write — snapshot captures whatever the file had before this write.
-		// In the fake, file content is unchanged from after the first call
-		// (since we didn't actually write anything). So the new backup matches.
-		await new Promise((r) => setTimeout(r, 5))
-		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
-		const snaps = listTrackedOutsideWrites(realProjectRoot)
-		expect(snaps).toHaveLength(2)
-		expect(snaps[0].timestamp).not.toBe(snaps[1].timestamp)
-	})
-
-	it("does NOT track writes inside cwd", async () => {
-		await switchMode("auto")
-		const ctx = makeCtx(pi, { cwd: realProjectRoot })
-		await pi.simulateToolCall("write", { path: "src/foo.ts" }, ctx)
-		expect(listTrackedOutsideWrites(realProjectRoot)).toEqual([])
-	})
-
-	it("notifies user when write is tracked", async () => {
-		const notifications: string[] = []
-		await switchMode("auto")
-		const ctx = makeCtx(pi, {
-			cwd: realProjectRoot,
-			ui: { notify: (m: string) => notifications.push(m), select: async () => "Block" },
-		})
-		await pi.simulateToolCall("write", { path: outsideFile }, ctx)
-		expect(notifications.some((n) => n.includes("tracked"))).toBe(true)
-	})
-
-	it("does NOT prompt on outside-cwd write even with strict UI", async () => {
-		await switchMode("auto")
-		let prompted = false
-		const ctx = makeCtx(pi, {
-			cwd: realProjectRoot,
-			ui: {
-				select: async () => {
-					prompted = true
-					return "Block"
+	it("does NOT follow up when assistant made no tool calls", async () => {
+		await emit(
+			handlers,
+			"turn_end",
+			{
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "Just text, no tool calls." }],
 				},
-				notify: () => {},
 			},
-		})
-		const result = await pi.simulateToolCall("write", { path: outsideFile }, ctx)
-		expect(prompted).toBe(false)
-		expect(result).toBeUndefined()
-	})
-})
+			ctx,
+		);
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
 
+	it("stops after reaching the depth cap", async () => {
+		// depth is 3; fire 3 turn_ends (with agent_end between each to reset isStepping)
+		await emit(handlers, "turn_end", assistantWithToolCall("step 1"), ctx);
+		await emit(handlers, "agent_end", { messages: [] }, ctx);
+		await emit(handlers, "turn_end", assistantWithToolCall("step 2"), ctx);
+		await emit(handlers, "agent_end", { messages: [] }, ctx);
+		await emit(handlers, "turn_end", assistantWithToolCall("step 3"), ctx);
+		await emit(handlers, "agent_end", { messages: [] }, ctx);
+		// 4th call should NOT follow up
+		await emit(handlers, "turn_end", assistantWithToolCall("step 4"), ctx);
+		expect(pi.sendUserMessage).toHaveBeenCalledTimes(3);
+	});
 
-describe("/outside-writes and /undo-outside-writes commands", () => {
-	let pi: FakePi
-	let cwd: string
-	let outsideDir: string
-	let outsideFile: string
-
-	beforeEach(() => {
-		pi = createFakePi()
-		cwd = mkdtempSync(join(tmpdir(), "pm-cmd-"))
-		outsideDir = mkdtempSync(join(tmpdir(), "pm-cmd-out-"))
-		outsideFile = join(outsideDir, "outside-target.txt")
-		permissionModesExtension(makeFakePiForExtension(pi))
-	})
-
-	afterEach(() => {
-		rmSync(cwd, { recursive: true, force: true })
-		rmSync(outsideDir, { recursive: true, force: true })
-	})
-
-	async function setupTrackedWrites() {
-		writeFileSync(outsideFile, "ORIGINAL")
-		await pi.simulateSessionStart(cwd)
-		pi.flags["permission-mode"] = "auto"
-		await pi.simulateSessionStart(cwd)
-
-		// Simulate two tracked writes
-		const ctx1 = makeCtx(pi, { cwd })
-		await pi.simulateToolCall("write", { path: outsideFile }, ctx1)
-		await new Promise((r) => setTimeout(r, 5))
-		const ctx2 = makeCtx(pi, { cwd })
-		await pi.simulateToolCall("edit", { path: outsideFile }, ctx2)
-	}
-
-	it("/outside-writes displays tracked snapshots via sendMessage", async () => {
-		await setupTrackedWrites()
-		await pi.simulateCommand("outside-writes", "", makeCtx(pi, { cwd }))
-		const lastMsg = pi.sentMessages[pi.sentMessages.length - 1]
-		expect(lastMsg.message.customType).toBe("outside-writes-list")
-		expect(String(lastMsg.message.content)).toContain(outsideFile)
-		expect(String(lastMsg.message.content)).toContain("would restore")
-	})
-
-	it("/undo-outside-writes --list behaves like /outside-writes", async () => {
-		await setupTrackedWrites()
-		await pi.simulateCommand("undo-outside-writes", "--list", makeCtx(pi, { cwd }))
-		expect(pi.sentMessages.some((m) =>
-			m.message.customType === "outside-writes-list"
-		)).toBe(true)
-	})
-
-	it("/undo-outside-writes list alias also works", async () => {
-		await setupTrackedWrites()
-		await pi.simulateCommand("undo-outside-writes", "list", makeCtx(pi, { cwd }))
-		expect(pi.sentMessages.some((m) =>
-			m.message.customType === "outside-writes-list"
-		)).toBe(true)
-	})
-
-	it("/undo-outside-writes all restores everything and pops all snapshots", async () => {
-		await setupTrackedWrites()
-		// Simulate that the tool actually wrote something
-		writeFileSync(outsideFile, "NEW_CONTENT")
-		await pi.simulateCommand("undo-outside-writes", "all", makeCtx(pi, { cwd }))
-		// File restored
-		expect(readFileSync(outsideFile, "utf-8")).toBe("ORIGINAL")
-		// Snapshots popped
-		expect(listTrackedOutsideWrites(cwd)).toEqual([])
-	})
-
-	it("/undo-outside-writes (no args) shows selector and restores selected", async () => {
-		await setupTrackedWrites()
-		writeFileSync(outsideFile, "NEW_CONTENT")
-		let selectorOptions: string[] = []
-		const ctx = makeCtx(pi, {
-			cwd,
-			ui: {
-				select: async (_label: string, options: string[]) => {
-					selectorOptions = options
-					return options[0]!
-				},
-				notify: () => {},
-			},
-		})
-		await pi.simulateCommand("undo-outside-writes", "", ctx)
-		expect(selectorOptions.length).toBeGreaterThan(0)
-		expect(readFileSync(outsideFile, "utf-8")).toBe("ORIGINAL")
-	})
-
-	it("/undo-outside-writes handles empty snapshot list gracefully", async () => {
-		await pi.simulateSessionStart(cwd)
-		const notifications: string[] = []
-		await pi.simulateCommand("undo-outside-writes", "all", makeCtx(pi, {
-			cwd,
-			ui: { notify: (m: string) => notifications.push(m), select: async () => "Block" },
-		}))
-		expect(notifications.some((n) => n.includes("No tracked"))).toBe(true)
-	})
-
-	it("/undo-outside-writes deletes file when backupContent was null", async () => {
-		await pi.simulateSessionStart(cwd)
-		pi.flags["permission-mode"] = "auto"
-		await pi.simulateSessionStart(cwd)
-		// File didn't exist before write
-		await pi.simulateToolCall("write", { path: outsideFile }, makeCtx(pi, { cwd }))
-		// Simulate tool creating the file
-		writeFileSync(outsideFile, "NEWLY_CREATED")
-		await pi.simulateCommand("undo-outside-writes", "all", makeCtx(pi, { cwd }))
-		expect(existsSync(outsideFile)).toBe(false)
-	})
-
-	it("/outside-writes is available in ask mode too", async () => {
-		// Verify the command runs without mode restriction (even in ask mode).
-		// Set up in auto mode, then switch to ask
-		pi.flags["permission-mode"] = "ask"
-		await pi.simulateSessionStart(cwd)
-		// In ask mode, outside-writes should not throw
-		await expect(
-			pi.simulateCommand("outside-writes", "", makeCtx(pi, { cwd }))
-		).resolves.not.toThrow()
-	})
-})
-
-// ---- Skill filtering in before_agent_start -----------------------------
-
-describe("skill filtering in before_agent_start", () => {
-	let tmpDir: string
-	let pi: FakePi
-	let realProjectRoot: string
-
-	function skillPrompt(skills: string[]): string {
-		// Use pi's actual `formatSkillsForPrompt` schema (see
-		// `@earendil-works/pi-coding-agent/dist/core/skills.js`). The v1.1.4
-		// tests used the wrong `<skill name="...">` attribute format and all
-		// passed while the feature was broken at runtime.
-		const blocks = skills.map(
-			(s) =>
-				[
-					"  <skill>",
-					`    <name>${s}</name>`,
-					`    <description>${s}</description>`,
-					`    <location>/home/user/.pi/agent/skills/${s}/SKILL.md</location>`,
-					"  </skill>",
-				].join("\n"),
-		)
-		return [
-			"You are a helpful assistant.",
-			"",
-			"<available_skills>",
-			...blocks,
-			"</available_skills>",
-			"",
-			"[ASK MODE ACTIVE]",
-			"## Available tools",
-		].join("\n")
-	}
-
-	async function triggerBeforeAgentStart(
-		prompt: string,
-		mode: string,
-	): Promise<{ message?: unknown; systemPrompt?: string } | undefined> {
-		pi.flags["permission-mode"] = mode
-		await pi.simulateSessionStart(realProjectRoot)
-		const handlers = pi.handlers.get("before_agent_start") ?? []
-		if (handlers.length === 0) return undefined
-		const event = {
-			type: "before_agent_start" as const,
-			prompt: "user",
-			systemPrompt: prompt,
-			systemPromptOptions: { cwd: realProjectRoot },
+	it("0 depth = unlimited", async () => {
+		await commands.get("auto-depth")!("0", ctx);
+		pi.sendUserMessage.mockClear();
+		for (let i = 0; i < 5; i++) {
+			await emit(handlers, "turn_end", assistantWithToolCall(`step ${i}`), ctx);
+			await emit(handlers, "agent_end", { messages: [] }, ctx);
 		}
-		const ctx = makeCtx(pi, { cwd: realProjectRoot })
-		const result = await handlers[0]!(event, ctx)
-		return result as { message?: unknown; systemPrompt?: string } | undefined
-	}
+		expect(pi.sendUserMessage).toHaveBeenCalledTimes(5);
+	});
 
-	beforeEach(() => {
-		tmpDir = mkdtempSync(join(tmpdir(), "pm-skf-"))
-		pi = createFakePi()
-		realProjectRoot = process.cwd()
-		// Re-point the model-profiles config at a tmpfile so each test starts
-		// from a known empty (or custom) config.
-		setModelsPath(join(tmpDir, "model-profiles.json"))
-	})
+	it("isStepping blocks re-entrant follow-up", async () => {
+		await emit(handlers, "turn_end", assistantWithToolCall("step 1"), ctx);
+		// Second turn_end before agent_end → isStepping should block it
+		await emit(handlers, "turn_end", assistantWithToolCall("step 2"), ctx);
+		expect(pi.sendUserMessage).toHaveBeenCalledTimes(1);
+	});
 
-	afterEach(() => {
-		// Clean up any .pi/ artifacts created in realProjectRoot
-		const projectTmp = join(realProjectRoot, ".pi", "projects")
-		if (existsSync(projectTmp)) rmSync(projectTmp, { recursive: true, force: true })
-		rmSync(tmpDir, { recursive: true, force: true })
-		// Restore default models path so other test files are unaffected
-		setModelsPath(join(realProjectRoot, "model-profiles.json"))
-	})
+	it("agent_end resets isStepping so the next turn can follow up", async () => {
+		await emit(handlers, "turn_end", assistantWithToolCall("step 1"), ctx);
+		await emit(handlers, "agent_end", { messages: [] }, ctx);
+		await emit(handlers, "turn_end", assistantWithToolCall("step 2"), ctx);
+		expect(pi.sendUserMessage).toHaveBeenCalledTimes(2);
+	});
 
-	it("does not filter skills when no filter is configured", async () => {
-		permissionModesExtension(makeFakePiForExtension(pi))
-		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
-		const result = await triggerBeforeAgentStart(prompt, "ask")
-		// systemPrompt should be unchanged
-		expect(result?.systemPrompt).toBeUndefined()
-	})
+	it("auto-follow-up error sets isStepping=false and decrements counter", async () => {
+		pi.sendUserMessage.mockImplementationOnce(() => {
+			throw new Error("not supported");
+		});
+		await emit(handlers, "turn_end", assistantWithToolCall("step 1"), ctx);
+		// Should not have left isStepping=true; should have decremented back to 0
+		// (After this, agent_end → next turn_end should be allowed)
+		await emit(handlers, "agent_end", { messages: [] }, ctx);
+		await emit(handlers, "turn_end", assistantWithToolCall("step 2"), ctx);
+		expect(pi.sendUserMessage).toHaveBeenCalledTimes(2);
+		expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Auto follow-up failed"), "warning");
+	});
+});
 
-	it("filters skills when a mode-specific skill filter is active", async () => {
-		writeFileSync(
-			join(tmpDir, "model-profiles.json"),
-			JSON.stringify({
-				active: "default",
-				default: {
-					plan: {
-						skills: ["brainstorming"],
+// ---------- Tests: plan flow ----------
+
+describe("plan flow", () => {
+	beforeEach(async () => {
+		await emit(handlers, "session_start", {}, ctx);
+		await commands.get("plan")!([], ctx);
+	});
+
+	it("Execute path switches to planExecuting=true and posts plan + execute message", async () => {
+		ctx.ui.select.mockResolvedValueOnce("Execute the plan");
+		const planText = `Plan:
+1. Read the config file
+2. Update the setting`;
+		await emit(
+			handlers,
+			"agent_end",
+			{
+				messages: [
+					{
+						role: "assistant",
+						content: [{ type: "text", text: planText }],
 					},
-				},
-			}),
-		)
-		permissionModesExtension(makeFakePiForExtension(pi))
-		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
-		const result = await triggerBeforeAgentStart(prompt, "plan")
-		expect(result?.systemPrompt).toBeDefined()
-		expect(result!.systemPrompt).toContain("brainstorming")
-		expect(result!.systemPrompt).not.toContain("systematic-debugging")
-	})
+				],
+			},
+			ctx,
+		);
+		expect(pi.sendMessage).toHaveBeenCalled();
+		// The execute call should have triggerTurn:true and deliverAs:"followUp"
+		const execCall = pi.sendMessage.mock.calls.find(
+			(c: unknown[]) => (c[0] as { customType?: string }).customType === "modes-execute",
+		);
+		expect(execCall).toBeDefined();
+		expect(execCall![1]).toMatchObject({ triggerTurn: true, deliverAs: "followUp" });
+	});
 
-	it("does not filter when config has no skill filter for the active mode", async () => {
-		writeFileSync(
-			join(tmpDir, "model-profiles.json"),
-			JSON.stringify({
-				active: "default",
-				default: {
-					plan: { model: "" }, // model only, no skills filter
-				},
-			}),
-		)
-		permissionModesExtension(makeFakePiForExtension(pi))
-		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
-		const result = await triggerBeforeAgentStart(prompt, "plan")
-		// No skills filter defined → no systemPrompt change
-		expect(result?.systemPrompt).toBeUndefined()
-	})
-
-	it("preserves mode-context message along with skill-filtered system prompt", async () => {
-		writeFileSync(
-			join(tmpDir, "model-profiles.json"),
-			JSON.stringify({
-				active: "default",
-				default: {
-					plan: {
-						skills: ["brainstorming"],
+	it("Refine path opens editor and posts refinement", async () => {
+		ctx.ui.select.mockResolvedValueOnce("Refine the plan");
+		ctx.ui.editor.mockResolvedValueOnce("Please add error handling to step 1");
+		await emit(
+			handlers,
+			"agent_end",
+			{
+				messages: [
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "Plan:\n1. Inspect the codebase\n2. Modify the settings" }],
 					},
-				},
-			}),
-		)
-		permissionModesExtension(makeFakePiForExtension(pi))
-		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
-		const result = await triggerBeforeAgentStart(prompt, "plan")
-		// Both message and systemPrompt should be present
-		expect(result?.message).toBeDefined()
-		expect((result?.message as { customType: string }).customType).toBe(
-			"modes-context",
-		)
-		expect(result?.systemPrompt).toContain("brainstorming")
-		expect(result?.systemPrompt).not.toContain("systematic-debugging")
-	})
+				],
+			},
+			ctx,
+		);
+		expect(ctx.ui.editor).toHaveBeenCalled();
+		expect(pi.sendUserMessage).toHaveBeenCalledWith(
+			"Please add error handling to step 1",
+			{ deliverAs: "followUp" },
+		);
+	});
 
-	it("handles empty skill filter (interpreted as no filter — allow all)", async () => {
-		// Per the v1.1.4 spec: an empty `skills` list is a no-op (treated like
-		// ["*"]) by filterSkillsFromPrompt. The user effectively said "no
-		// filter" — same as the default behavior.
-		writeFileSync(
-			join(tmpDir, "model-profiles.json"),
-			JSON.stringify({
-				default: {
-					plan: { skills: [] },
-				},
-			}),
-		)
-		permissionModesExtension(makeFakePiForExtension(pi))
-		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
-		const result = await triggerBeforeAgentStart(prompt, "plan")
-		// systemPrompt should contain the original skills (filter is a no-op)
-		expect(result?.systemPrompt).toBeDefined()
-		expect(result!.systemPrompt).toContain("brainstorming")
-		expect(result!.systemPrompt).toContain("systematic-debugging")
-	})
+	it("Stay path does nothing", async () => {
+		ctx.ui.select.mockResolvedValueOnce("Stay in plan mode");
+		await emit(
+			handlers,
+			"agent_end",
+			{
+				messages: [
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "Plan:\n1. Inspect the codebase\n2. Modify the settings" }],
+					},
+				],
+			},
+			ctx,
+		);
+		// No execute or refine message sent
+		const execCall = pi.sendMessage.mock.calls.find(
+			(c: unknown[]) => (c[0] as { customType?: string }).customType === "modes-execute",
+		);
+		expect(execCall).toBeUndefined();
+		expect(pi.sendUserMessage).not.toHaveBeenCalled();
+	});
 
-	it("filters skills only for the mode the filter is configured on", async () => {
-		writeFileSync(
-			join(tmpDir, "model-profiles.json"),
-			JSON.stringify({
-				active: "default",
-				default: {
-					plan: { skills: ["brainstorming"] },
+	it("posts 'Plan Complete!' and clears widget when all [DONE:n] are seen", async () => {
+		// Manually simulate plan-execute state by sending a plan + Execute
+		ctx.ui.select.mockResolvedValueOnce("Execute the plan");
+		await emit(
+			handlers,
+			"agent_end",
+			{
+				messages: [
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "Plan:\n1. Inspect the codebase\n2. Modify the settings" }],
+					},
+				],
+			},
+			ctx,
+		);
+		pi.sendMessage.mockClear();
+		// Simulate a turn_end with the assistant marking both steps done
+		await emit(
+			handlers,
+			"turn_end",
+			{
+				message: {
+					role: "assistant",
+					content: [{ type: "text", text: "Done. [DONE:1] [DONE:2]" }],
 				},
-			}),
-		)
-		permissionModesExtension(makeFakePiForExtension(pi))
-		const prompt = skillPrompt(["brainstorming", "systematic-debugging"])
-		const askResult = await triggerBeforeAgentStart(prompt, "ask")
-		// ask mode has no filter → no systemPrompt change
-		expect(askResult?.systemPrompt).toBeUndefined()
-	})
+			},
+			ctx,
+		);
+		// Then agent_end should detect all todos completed and post plan-complete
+		await emit(
+			handlers,
+			"agent_end",
+			{ messages: [] },
+			ctx,
+		);
+		const completeCall = pi.sendMessage.mock.calls.find(
+			(c: unknown[]) => (c[0] as { customType?: string }).customType === "plan-complete",
+		);
+		expect(completeCall).toBeDefined();
+		expect(ctx.ui.setWidget).toHaveBeenCalledWith("plan-todos", undefined);
+	});
+});
 
-	it("applies skill filter from active profile (not default profile)", async () => {
-		writeFileSync(
-			join(tmpDir, "model-profiles.json"),
-			JSON.stringify({
-				active: "custom",
-				custom: {
-					plan: { skills: ["brainstorming"] },
-				},
-				default: {
-					plan: { skills: ["writing-plans"] },
-				},
-			}),
-		)
-		permissionModesExtension(makeFakePiForExtension(pi))
-		const prompt = skillPrompt(["brainstorming", "writing-plans", "systematic-debugging"])
-		const result = await triggerBeforeAgentStart(prompt, "plan")
-		expect(result?.systemPrompt).toContain("brainstorming")
-		expect(result?.systemPrompt).not.toContain("writing-plans")
-		expect(result?.systemPrompt).not.toContain("systematic-debugging")
-	})
-})
+// ---------- Tests: status pill ----------
+
+describe("status pill", () => {
+	it("sets a 'modes' status with the current mode", async () => {
+		await emit(handlers, "session_start", {}, ctx);
+		expect(ctx.ui.setStatus).toHaveBeenCalledWith("modes", expect.stringContaining("Default"));
+	});
+
+	it("updates on mode change", async () => {
+		await emit(handlers, "session_start", {}, ctx);
+		ctx.ui.setStatus.mockClear();
+		await commands.get("plan")!([], ctx);
+		expect(ctx.ui.setStatus).toHaveBeenCalledWith("modes", expect.stringContaining("Plan"));
+	});
+});
+
+// ---------- Tests: isSafeCommand sanity (smoke) ----------
+
+describe("isSafeCommand sanity check from inside factory", () => {
+	it("agrees with itself across known cases", () => {
+		expect(isSafeCommand("ls")).toBe(true);
+		expect(isSafeCommand("rm foo")).toBe(false);
+	});
+});

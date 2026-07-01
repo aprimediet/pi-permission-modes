@@ -1,23 +1,10 @@
 /**
- * Pure helpers for the permission-modes extension.
- *
- * - Bash read-only classifier used by Plan mode and the default/accept-edits
- *   gates (SAFE allowlist AND not DESTRUCTIVE).
- * - Outside-cwd / project-root detection for the auto-mode relaxation.
- * - Numbered "Plan:" extraction and [DONE:n] step tracking used by Plan mode's
- *   execute/track flow.
- *
- * Ported from pi's bundled `examples/extensions/plan-mode/utils.ts`.
+ * Pure utility functions for permission-modes.
+ * Extracted for testability.
  */
 
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs"
-import { createHash } from "node:crypto"
-import path from "node:path"
-
-const MAX_TRACKED_WRITES = 100
-
-// Commands that mutate state — never allowed in plan mode, and prompt elsewhere.
-const DESTRUCTIVE_PATTERNS: RegExp[] = [
+// Destructive commands blocked in plan mode (also checked in default mode for bash)
+export const DESTRUCTIVE_PATTERNS: RegExp[] = [
 	/\brm\b/i,
 	/\brmdir\b/i,
 	/\bmv\b/i,
@@ -32,8 +19,8 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
 	/\btruncate\b/i,
 	/\bdd\b/i,
 	/\bshred\b/i,
-	/(^|[^<])>(?!>)/, // single redirect (not >>)
-	/>>/, // append redirect
+	/(^|[^<])>(?!>)/,
+	/>>/,
 	/\bnpm\s+(install|uninstall|update|ci|link|publish)/i,
 	/\byarn\s+(add|remove|install|publish)/i,
 	/\bpnpm\s+(add|remove|install|publish)/i,
@@ -53,8 +40,8 @@ const DESTRUCTIVE_PATTERNS: RegExp[] = [
 	/\b(vim?|nano|emacs|code|subl)\b/i,
 ];
 
-// Read-only commands allowed without confirmation.
-const SAFE_PATTERNS: RegExp[] = [
+// Safe read-only commands allowed in plan mode
+export const SAFE_PATTERNS: RegExp[] = [
 	/^\s*cat\b/,
 	/^\s*head\b/,
 	/^\s*tail\b/,
@@ -107,11 +94,22 @@ const SAFE_PATTERNS: RegExp[] = [
 	/^\s*eza\b/,
 ];
 
-/** A command is "safe" iff it matches the allowlist AND no destructive pattern. */
+/**
+ * Classify a bash command as safe (read-only allowlist) AND not destructive.
+ * Used by plan mode (read-only) and default mode (prompt on destructive).
+ */
 export function isSafeCommand(command: string): boolean {
 	const isDestructive = DESTRUCTIVE_PATTERNS.some((p) => p.test(command));
 	const isSafe = SAFE_PATTERNS.some((p) => p.test(command));
 	return !isDestructive && isSafe;
+}
+
+/**
+ * True if a command matches at least one DESTRUCTIVE pattern.
+ * Used in default mode to decide whether to prompt for bash.
+ */
+export function isDestructiveCommand(command: string): boolean {
+	return DESTRUCTIVE_PATTERNS.some((p) => p.test(command));
 }
 
 export interface TodoItem {
@@ -122,8 +120,8 @@ export interface TodoItem {
 
 export function cleanStepText(text: string): string {
 	let cleaned = text
-		.replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1") // strip bold/italic
-		.replace(/`([^`]+)`/g, "$1") // strip inline code
+		.replace(/\*{1,2}([^*]+)\*{1,2}/g, "$1") // Remove bold/italic
+		.replace(/`([^`]+)`/g, "$1") // Remove code
 		.replace(
 			/^(Use|Run|Execute|Create|Write|Read|Check|Verify|Update|Modify|Add|Remove|Delete|Install)\s+(the\s+)?/i,
 			"",
@@ -140,7 +138,6 @@ export function cleanStepText(text: string): string {
 	return cleaned;
 }
 
-/** Extract a numbered list under a `Plan:` header into TodoItems. */
 export function extractTodoItems(message: string): TodoItem[] {
 	const items: TodoItem[] = [];
 	const headerMatch = message.match(/\*{0,2}Plan:\*{0,2}\s*\n/i);
@@ -173,7 +170,6 @@ export function extractDoneSteps(message: string): number[] {
 	return steps;
 }
 
-/** Mark any `[DONE:n]` steps found in `text` complete. Returns how many tags were seen. */
 export function markCompletedSteps(text: string, items: TodoItem[]): number {
 	const doneSteps = extractDoneSteps(text);
 	for (const step of doneSteps) {
@@ -183,369 +179,39 @@ export function markCompletedSteps(text: string, items: TodoItem[]): number {
 	return doneSteps.length;
 }
 
-const COMPLETION_SIGNALS: RegExp[] = [
-	/\b(plan|task|work|job|everything|all)\s+(is\s+|are\s+|has\s+been\s+)?(complete|completed|done|finished)\b/i,
-	/\ball\s+done\b/i,
-	/\bno\s+(more|further)\s+(steps|tasks|actions|work)\b/i,
-	/\b(i'?m|i\s+am)\s+(done|finished)\b/i,
-	/\bfinished\b/i,
-];
-
-/** Heuristic: does the assistant text claim the work is finished? */
+/**
+ * Heuristic: the assistant's last message signals that the task is complete and
+ * there is nothing more to do. Used to decide whether to send a follow-up
+ * "Continue" prompt in auto mode.
+ *
+ * Matches patterns like:
+ *   - "the plan is complete", "task is done", "everything is finished"
+ *   - "all done"
+ *   - "no more changes needed", "no further work"
+ *   - "finished"
+ */
 export function isCompletionSignal(text: string): boolean {
-	return COMPLETION_SIGNALS.some((p) => p.test(text));
+	if (!text) return false;
+	const t = text.trim();
+	if (t.length === 0) return false;
+	const patterns: RegExp[] = [
+		/\b(plan|task|everything|all)\s+(is\s+)?(complete|completed|done|finished)\b/i,
+		/\ball\s+done\b/i,
+		/\bno\s+(more|further|additional)\s+(work|changes|steps?|edits?|tasks?)\b/i,
+		/\b(finished|done|complete)\b\s*[\.\!\?]*\s*$/i,
+		/^\s*(done|finished|complete)\s*[\.\!\?]*\s*$/i,
+	];
+	return patterns.some((p) => p.test(t));
 }
 
-/** Compact token count, e.g. 1234 -> "1.2k", 12000 -> "12k". */
+/**
+ * Compact integer formatter: 999 -> "999", 1200 -> "1.2k", 12345 -> "12k".
+ */
 export function formatCount(n: number): string {
-	if (!Number.isFinite(n) || n <= 0) return "0";
-	if (n < 1000) return String(Math.round(n));
-	const k = n / 1000;
-	return `${k >= 10 ? Math.round(k) : k.toFixed(1)}k`;
+	if (!Number.isFinite(n)) return "0";
+	const abs = Math.abs(n);
+	if (abs < 1000) return `${n}`;
+	if (abs < 10_000) return `${(n / 1000).toFixed(1)}k`;
+	if (abs < 1_000_000) return `${Math.round(n / 1000)}k`;
+	return `${(n / 1_000_000).toFixed(1)}M`;
 }
-
-/**
- * Returns true iff `targetPath` resolves to a location outside `cwd`.
- *
- * Empty string is treated as "inside cwd" (no path = nothing to be outside of).
- * Absolute paths are compared against cwd; relative paths are resolved from cwd.
- * Does NOT resolve symlinks — same limitation as `path.resolve`.
- */
-export function isOutsideCwd(targetPath: string, cwd: string): boolean {
-	if (!targetPath) return false;
-	const resolved = path.isAbsolute(targetPath)
-		? path.resolve(targetPath)
-		: path.resolve(cwd, targetPath);
-	const cwdAbs = path.resolve(cwd);
-	// Same dir or strictly inside cwd → not outside
-	if (resolved === cwdAbs) return false;
-	return !resolved.startsWith(cwdAbs + path.sep);
-}
-
-/**
- * Heuristic: does a bash command reference paths outside `cwd`?
- *
- * Flags:
- *   - absolute paths anywhere in the command
- *   - `..` traversal (cd .., ls ../foo)
- *   - `~` or `$HOME` / `$TMPDIR` expansions
- *
- * Conservative: false negatives are acceptable (we still prompt for destructive
- * commands separately), false positives are NOT — we don't want to over-prompt.
- */
-export function commandTargetsOutsideCwd(command: string, cwd: string): boolean {
-	if (!command || !command.trim()) return false;
-
-	// Absolute path anywhere in the command.
-	// `/` must be at the start of a token (after whitespace, ;&|() or string start),
-	// and the next char must be a real path char (not `.` to avoid `./` and `../` false positives).
-	if (/(^|[\s;&|('])(\/[A-Za-z0-9_\-])/.test(command)) return true;
-
-	// Tilde expansion: `~` at start of token (not in the middle of a path)
-	if (/(^|[\s;&|()])(~|\$HOME|\$TMPDIR|\$TMP|\$PWD\b)/.test(command)) return true;
-
-	// `..` as a path component (not as part of `...` or `./..`)
-	if (/(^|[\s;&|(])\.\.($|[\s/&|)])/.test(command)) return true;
-
-	return false;
-}
-
-/**
- * Walk up from `cwd` looking for a project root marker (.git or package.json).
- * Returns the project root path, or `null` if none found within 20 levels.
- */
-export function findProjectRoot(cwd: string): string | null {
-	let dir = path.resolve(cwd);
-	for (let i = 0; i < 20; i++) {
-		// Stop at filesystem root
-		if (dir === path.dirname(dir)) return null;
-		// Detect: .git, package.json
-		if (
-			existsSync(path.join(dir, ".git")) ||
-			existsSync(path.join(dir, "package.json"))
-		) {
-			return dir;
-		}
-		dir = path.dirname(dir);
-	}
-	return null;
-}
-
-/**
- * Resolve the project's stable ID. Looks for the existing
- * `.pi/permission-modes-<hash>.md` marker file (created by pi when the
- * project was opened). Falls back to a hash of `cwd` if not found.
- *
- * The marker filename is the canonical source because pi creates it
- * automatically and uses the same hash for kanban boards, memory, etc.
- */
-export function getProjectId(cwd: string): string {
-	try {
-		const piDir = path.join(cwd, ".pi")
-		if (existsSync(piDir)) {
-			const entries = readdirSync(piDir)
-			const match = entries.find((e) =>
-				/^permission-modes-[a-f0-9]+\.md$/.test(e),
-			)
-			if (match) {
-				const id = match.replace(/^permission-modes-/, "").replace(/\.md$/, "")
-				return id
-			}
-		}
-	} catch {
-		/* ignore — fall through to hash fallback */
-	}
-	return hashPath(cwd)
-}
-
-/** First 8 hex chars of sha256(input). Deterministic. */
-export function hashPath(p: string): string {
-	return createHash("sha256").update(p).digest("hex").slice(0, 8)
-}
-
-/**
- * Return the absolute path to the project's outside-writes snapshot dir,
- * creating it (and all parents) if it doesn't exist.
- *
- * Layout: `<cwd>/.pi/projects/<projectId>/tmp/outside-writes/`
- *
- * Created lazily on first call so empty projects don't litter their tree.
- * Safe to call repeatedly — idempotent.
- */
-export function getProjectTmpDir(cwd: string): string {
-	const id = getProjectId(cwd)
-	const dir = path.join(cwd, ".pi", "projects", id, "tmp", "outside-writes")
-	mkdirSync(dir, { recursive: true })
-	return dir
-}
-
-/**
- * Check if `targetPath` is inside the project root (if one can be detected
- * or is provided). Returns false if no project root is found — caller should
- * fall back to `isOutsideCwd` in that case.
- */
-export function isInsideProject(
-	targetPath: string,
-	cwd: string,
-	projectRoot?: string | null,
-): boolean {
-	const root = projectRoot ?? findProjectRoot(cwd);
-	if (!root) return false;
-	const resolved = path.isAbsolute(targetPath)
-		? path.resolve(targetPath)
-		: path.resolve(cwd, targetPath);
-	const rootAbs = path.resolve(root);
-	return resolved.startsWith(rootAbs + path.sep) || resolved === rootAbs;
-}
-
-export interface OutsideWriteSnapshot {
-	timestamp: string
-	originalPath: string
-	toolName: "edit" | "write"
-	backupContent: string | null
-}
-
-/**
- * Persist a snapshot of a write that auto mode performed outside cwd.
- * Filename: `<iso-timestamp-sanitized>__<path-hash>.json`
- *
- * Caps at MAX_TRACKED_WRITES (100) — when full, evicts the oldest by
- * timestamp before writing the new one. This prevents the tmp dir from
- * growing unboundedly in long-running sessions.
- *
- * Never throws — failures are logged via console.warn and swallowed.
- */
-export function trackOutsideWrite(
-	cwd: string,
-	snapshot: OutsideWriteSnapshot,
-): void {
-	try {
-		const dir = getProjectTmpDir(cwd)
-		const files = readdirSync(dir).filter((f) => f.endsWith(".json"))
-		if (files.length >= MAX_TRACKED_WRITES) {
-			// Evict oldest by filename (which starts with ISO timestamp, sortable)
-			const sorted = files.sort()
-			const evictCount = files.length - MAX_TRACKED_WRITES + 1
-			for (let i = 0; i < evictCount; i++) {
-				try {
-					unlinkSync(path.join(dir, sorted[i]!))
-				} catch {
-					/* ignore */
-				}
-			}
-		}
-		const safeTs = snapshot.timestamp.replace(/[:.]/g, "-")
-		const filename = `${safeTs}__${hashPath(snapshot.originalPath)}.json`
-		writeFileSync(
-			path.join(dir, filename),
-			JSON.stringify(snapshot, null, 2),
-			{ mode: 0o600 },
-		)
-	} catch (err) {
-		console.warn("[permission-modes] Failed to track outside write:", err)
-	}
-}
-
-/**
- * Read all snapshots from the project's tmp dir, sorted by timestamp
- * ascending. Malformed JSON files are skipped (logged). Returns [] on
- * any error or when dir doesn't exist.
- */
-export function listTrackedOutsideWrites(
-	cwd: string,
-): OutsideWriteSnapshot[] {
-	try {
-		const dir = getProjectTmpDir(cwd)
-		const files = readdirSync(dir).filter((f) => f.endsWith(".json"))
-		const snaps: OutsideWriteSnapshot[] = []
-		for (const f of files) {
-			try {
-				const raw = readFileSync(path.join(dir, f), "utf-8")
-				const parsed = JSON.parse(raw) as OutsideWriteSnapshot
-				// Basic shape validation
-				if (
-					typeof parsed.timestamp === "string" &&
-					typeof parsed.originalPath === "string" &&
-					(parsed.toolName === "edit" || parsed.toolName === "write") &&
-					(parsed.backupContent === null ||
-						typeof parsed.backupContent === "string")
-				) {
-					snaps.push(parsed)
-				}
-			} catch (err) {
-				console.warn(`[permission-modes] Skipping malformed snapshot ${f}:`, err)
-			}
-		}
-		return snaps.sort((a, b) => a.timestamp.localeCompare(b.timestamp))
-	} catch (err) {
-		console.warn("[permission-modes] Failed to list tracked writes:", err)
-		return []
-	}
-}
-
-/**
- * Restore the original content (or delete the file if it didn't exist)
- * for a tracked outside write. Returns the action taken.
- *
- * - `backupContent !== null` and file differs → write backup, return `restored`
- * - `backupContent !== null` and file matches → return `noop`
- * - `backupContent === null` and file exists → unlink, return `deleted`
- * - `backupContent === null` and file missing → return `noop`
- *
- * Never throws — file-system errors are returned as `{restored: false, action: "noop"}`.
- */
-export function restoreOutsideWrite(snapshot: OutsideWriteSnapshot): {
-	restored: boolean
-	action: "restored" | "deleted" | "noop"
-} {
-	try {
-		const { originalPath, backupContent } = snapshot
-		if (backupContent === null) {
-			if (existsSync(originalPath)) {
-				unlinkSync(originalPath)
-				return { restored: true, action: "deleted" }
-			}
-			return { restored: true, action: "noop" }
-		}
-		// Non-null backup: compare current content
-		if (existsSync(originalPath)) {
-			const current = readFileSync(originalPath, "utf-8")
-			if (current === backupContent) {
-				return { restored: true, action: "noop" }
-			}
-		}
-		// Write backup (creates parent dirs if needed)
-		mkdirSync(path.dirname(originalPath), { recursive: true })
-		writeFileSync(originalPath, backupContent, { mode: 0o644 })
-		return { restored: true, action: "restored" }
-	} catch (err) {
-		console.warn("[permission-modes] Failed to restore outside write:", err)
-		return { restored: false, action: "noop" }
-	}
-}
-
-/**
- * Delete the snapshot file corresponding to `snapshot`. Safe to call
- * when the file doesn't exist (no-op).
- *
- * Filename is reconstructed the same way as `trackOutsideWrite`.
- */
-export function popTrackedOutsideWrite(
-	cwd: string,
-	snapshot: OutsideWriteSnapshot,
-): void {
-	try {
-		const dir = getProjectTmpDir(cwd)
-		const safeTs = snapshot.timestamp.replace(/[:.]/g, "-")
-		const filename = `${safeTs}__${hashPath(snapshot.originalPath)}.json`
-		const filepath = path.join(dir, filename)
-		if (existsSync(filepath)) unlinkSync(filepath)
-	} catch (err) {
-		console.warn("[permission-modes] Failed to pop tracked write:", err)
-	}
-}
-
-/**
- * Remove skill XML blocks from the system prompt whose names are NOT in the
- * allowedSkills list.
- *
- * Skill blocks in the actual pi prompt follow this XML schema (see
- * `@earendil-works/pi-coding-agent/dist/core/skills.js:formatSkillsForPrompt`):
- *
- *   <available_skills>
- *     <skill>
- *       <name>SKILL_NAME</name>
- *       <description>...</description>
- *       <location>...absolute path to SKILL.md...</location>
- *     </skill>
- *     ...
- *   </available_skills>
- *
- * NOTE: This is NOT the Agent Skills spec's `<skill name="...">` attribute
- * format. The v1.1.4 implementation used that wrong schema and silently let
- * all skills through (regex matched zero of the real blocks). v1.1.5 fixed
- * the regex to match the child `<name>` element.
- *
- * The function is a no-op (returns the prompt unchanged) when:
- *   - allowedSkills is ["*"] (allow all — default behavior)
- *   - allowedSkills is empty (filter nothing — same as "*")
- *   - No skill blocks are found in the prompt text
- *
- * Skill names are constrained to [a-z0-9-] per the Agent Skills spec, so
- * no regex escaping is needed.
- *
- * @param prompt         Full system prompt text
- * @param allowedSkills  Array of skill names to keep, or ["*"] for all
- * @returns Modified prompt with disallowed skill blocks removed
- */
-export function filterSkillsFromPrompt(
-	prompt: string,
-	allowedSkills: string[],
-): string {
-	// Fast-path: allow all
-	if (
-		!allowedSkills ||
-		allowedSkills.length === 0 ||
-		(allowedSkills.length === 1 && allowedSkills[0] === "*")
-	) {
-		return prompt
-	}
-
-	// Fast-path: no skill blocks at all
-	if (!prompt.includes("<skill")) return prompt
-
-	// Remove `<skill>...</skill>` blocks whose child `<name>` element is NOT in
-	// allowedSkills. We deliberately allow flexible whitespace/indentation
-	// between `<skill>` and `<name>` because pi's `formatSkillsForPrompt` uses
-	// two-space indentation, but external callers might re-format.
-	//
-	// The capture group matches one line of `<name>...</name>` (no nested tags
-	// allowed inside the name — Agent Skills spec constrains names to
-	// [a-z0-9-]). `[\s\S]*?` is lazy so it stops at the FIRST `</skill>`,
-	// which is correct because skills don't nest.
-	return prompt.replace(
-		/<skill>\s*<name>([^<]+)<\/name>[\s\S]*?<\/skill>/g,
-		(match, name: string) => (allowedSkills.includes(name) ? match : ""),
-	)
-}
-
