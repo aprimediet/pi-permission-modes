@@ -13,6 +13,7 @@ import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage, TextContent } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, WorkingIndicatorOptions } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
 import {
 	extractTodoItems,
 	formatCount,
@@ -104,6 +105,42 @@ export default function (pi: ExtensionAPI): void {
 	// Cached git branch (read once on session_start, refreshed via footerData events)
 	let gitBranch: string | null = null;
 
+	function renderPlanTodoLines(ctx: ExtensionContext): string[] {
+		return planTodos.map((item) => {
+			if (item.completed) {
+				return (
+					ctx.ui.theme.fg("success", "☑ ") +
+					ctx.ui.theme.fg("muted", ctx.ui.theme.strikethrough(item.text))
+				);
+			}
+			return `${ctx.ui.theme.fg("muted", "☐ ")}${item.text}`;
+		});
+	}
+
+	function syncPlanTodoWidget(ctx: ExtensionContext): void {
+		if (!ctx.hasUI) return;
+		if (planTodos.length === 0) {
+			ctx.ui.setWidget("plan-todos", undefined);
+			return;
+		}
+		ctx.ui.setWidget("plan-todos", renderPlanTodoLines(ctx));
+	}
+
+	function buildPlanExecutionBody(): string {
+		const remainingList = planTodos.map((t) => `${t.step}. ${t.text}`).join("\n");
+		const firstStep = planTodos[0];
+		const todoHint =
+			planTodos.length > 2
+				? "\nUse the todo tool to list and toggle the steps as you finish them."
+				: "";
+		return `Execute the plan now. Steps:
+
+${remainingList}
+
+Start with: ${firstStep ? firstStep.text : "(first step)"}${todoHint}
+After finishing each step, include a [DONE:n] tag in your response.`;
+	}
+
 	// ---- Register CLI flag ----
 	pi.registerFlag("permission-mode", {
 		description: "Start in a permission mode: default | plan | auto",
@@ -191,6 +228,56 @@ export default function (pi: ExtensionAPI): void {
 			isStepping = true;
 			persistState();
 			ctx.ui.notify("Auto-follow-up stopped. Switch mode or run /auto to resume.", "info");
+		},
+	});
+
+	pi.registerTool({
+		name: "todo",
+		label: "Todo",
+		description: "Inspect and update the active plan todo list",
+		parameters: Type.Object({
+			action: Type.Union([Type.Literal("list"), Type.Literal("toggle")]),
+			step: Type.Optional(Type.Number()),
+		}),
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			if (params.action === "list") {
+				return {
+					content: [
+						{
+							type: "text",
+							text: planTodos.length
+								? planTodos
+									.map((item) => `${item.completed ? "[x]" : "[ ]"} #${item.step}: ${item.text}`)
+									.join("\n")
+								: "No active todo list",
+						},
+					],
+					details: { action: "list", todos: [...planTodos] },
+				};
+			}
+
+			const step = params.step;
+			if (typeof step !== "number" || !Number.isFinite(step)) {
+				return {
+					content: [{ type: "text", text: "Error: step required for toggle" }],
+					details: { action: "toggle", todos: [...planTodos], error: "step required" },
+				};
+			}
+
+			const item = planTodos.find((t) => t.step === step);
+			if (!item) {
+				return {
+					content: [{ type: "text", text: `Step ${step} not found` }],
+					details: { action: "toggle", todos: [...planTodos], error: `step ${step} not found` },
+				};
+			}
+
+			item.completed = !item.completed;
+			syncPlanTodoWidget(ctx);
+			return {
+				content: [{ type: "text", text: `Step ${step} ${item.completed ? "done" : "undone"}` }],
+				details: { action: "toggle", todos: [...planTodos] },
+			};
 		},
 	});
 
@@ -446,6 +533,10 @@ export default function (pi: ExtensionAPI): void {
 		if (planExecuting && planTodos.length > 0) {
 			const remaining = planTodos.filter((t) => !t.completed);
 			const todoList = remaining.map((t) => `${t.step}. ${t.text}`).join("\n");
+			const todoHint =
+				planTodos.length > 2
+					? "\nUse the todo tool to list and toggle the steps as you finish them."
+					: "";
 			return {
 				message: {
 					customType: "modes-context",
@@ -453,6 +544,7 @@ export default function (pi: ExtensionAPI): void {
 
 Remaining steps:
 ${todoList}
+${todoHint}
 
 Execute each step in order. After completing a step, include a [DONE:n] tag in your response.`,
 					display: false,
@@ -533,18 +625,7 @@ Proceed without asking for confirmation. After completing each meaningful chunk,
 		if (planExecuting && planTodos.length > 0) {
 			const text = getTextContent(last);
 			markCompletedSteps(text, planTodos);
-			if (ctx.hasUI) {
-				const lines = planTodos.map((item) => {
-					if (item.completed) {
-						return (
-							ctx.ui.theme.fg("success", "☑ ") +
-							ctx.ui.theme.fg("muted", ctx.ui.theme.strikethrough(item.text))
-						);
-					}
-					return `${ctx.ui.theme.fg("muted", "☐ ")}${item.text}`;
-				});
-				ctx.ui.setWidget("plan-todos", lines);
-			}
+			syncPlanTodoWidget(ctx);
 			persistState();
 		}
 
@@ -640,19 +721,8 @@ Proceed without asking for confirmation. After completing each meaningful chunk,
 			persistState();
 
 			// Initial widget
-			if (ctx.hasUI) {
-				const lines = planTodos.map((item) => `${ctx.ui.theme.fg("muted", "☐ ")}${item.text}`);
-				ctx.ui.setWidget("plan-todos", lines);
-			}
-
-			const remainingList = planTodos.map((t) => `${t.step}. ${t.text}`).join("\n");
-			const firstStep = planTodos[0];
-			const execBody = `Execute the plan now. Steps:
-
-${remainingList}
-
-Start with: ${firstStep ? firstStep.text : "(first step)"}
-After finishing each step, include a [DONE:n] tag in your response.`;
+			const execBody = buildPlanExecutionBody();
+			syncPlanTodoWidget(ctx);
 
 			pi.sendMessage(planTodoListMessage, { deliverAs: "followUp" });
 			pi.sendMessage(
@@ -704,7 +774,7 @@ After finishing each step, include a [DONE:n] tag in your response.`;
 				toolsBeforePlanMode = modesEntry.data.toolsBeforePlanMode;
 			}
 
-			// 3) If we were mid-plan-execution, re-scan assistant messages after the last execute marker
+			// 3) If we were mid-plan-execution, re-scan assistant and todo messages after the last execute marker
 			const executeMarker = entries
 				.filter(
 					(e) =>
@@ -714,13 +784,23 @@ After finishing each step, include a [DONE:n] tag in your response.`;
 				.pop();
 			if (executeMarker) {
 				const executeIndex = entries.indexOf(executeMarker as never);
-				// Re-extract todos from the most recent assistant message containing a numbered plan
 				let extracted: TodoItem[] = [];
 				for (let i = executeIndex + 1; i < entries.length; i++) {
-					const entry = entries[i] as { type?: string; message?: AgentMessage };
-					if (entry.type === "message" && entry.message && isAssistantMessage(entry.message)) {
+					const entry = entries[i] as {
+						type?: string;
+						message?: AgentMessage & { toolName?: string; details?: unknown };
+					};
+					if (entry.type !== "message" || !entry.message) continue;
+					if (isAssistantMessage(entry.message)) {
 						const items = extractTodoItems(getTextContent(entry.message));
 						if (items.length > 0) extracted = items;
+						continue;
+					}
+					if (entry.message.role === "toolResult" && entry.message.toolName === "todo") {
+						const details = entry.message.details as { todos?: TodoItem[] } | undefined;
+						if (Array.isArray(details?.todos) && details.todos.length > 0) {
+							extracted = details.todos.map((item) => ({ ...item }));
+						}
 					}
 				}
 				if (extracted.length > 0) {
@@ -763,18 +843,7 @@ After finishing each step, include a [DONE:n] tag in your response.`;
 		}
 
 		// 5) Restore plan-execute widget if applicable
-		if (planExecuting && planTodos.length > 0 && ctx.hasUI) {
-			const lines = planTodos.map((item) => {
-				if (item.completed) {
-					return (
-						ctx.ui.theme.fg("success", "☑ ") +
-						ctx.ui.theme.fg("muted", ctx.ui.theme.strikethrough(item.text))
-					);
-				}
-				return `${ctx.ui.theme.fg("muted", "☐ ")}${item.text}`;
-			});
-			ctx.ui.setWidget("plan-todos", lines);
-		}
+		syncPlanTodoWidget(ctx);
 
 		// 6) Install footer + status
 		updateStatus(ctx);

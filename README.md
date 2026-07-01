@@ -51,7 +51,7 @@ pi -e ./index.ts
 1. Run `/plan` (or use `Shift+Tab` to cycle into plan mode).
 2. The agent reads your code, asks clarifying questions, and produces a numbered `Plan:` block.
 3. pi prompts you with three options:
-   - **Execute the plan** — switches out of plan mode, restores `edit`/`write` tools, posts the steps to the agent, and tracks progress with a `☐/☑` widget. The agent emits `[DONE:n]` tags as it finishes each step; pi marks them and posts **Plan Complete ✓** when all are done.
+   - **Execute the plan** — switches out of plan mode, restores `edit`/`write` tools, posts the steps to the agent, and tracks progress with a `☐/☑` widget. The agent emits `[DONE:n]` tags as it finishes each step; pi marks them and posts **Plan Complete ✓** when all are done. If the plan has more than 2 steps, pi also exposes the `todo` tool and tells the agent to use it for step tracking.
    - **Stay in plan mode** — keep exploring.
    - **Refine the plan** — open an editor, type feedback, and the agent iterates.
 

@@ -70,6 +70,8 @@ interface MockPi {
 	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
 	registerFlag: any;
 	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
+	registerTool: any;
+	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
 	getActiveTools: any;
 	// biome-ignore lint/suspicious/noExplicitAny: vitest mock typing is too strict for our needs
 	setActiveTools: any;
@@ -123,10 +125,11 @@ function makeContext(opts: { hasUI?: boolean } = {}): MockContext {
 	};
 }
 
-function makePi(): { pi: MockPi; handlers: Map<string, AnyHandler[]>; commands: Map<string, AnyHandler>; shortcuts: Map<string, AnyHandler> } {
+function makePi(): { pi: MockPi; handlers: Map<string, AnyHandler[]>; commands: Map<string, AnyHandler>; shortcuts: Map<string, AnyHandler>; tools: Map<string, Record<string, unknown>> } {
 	const handlers = new Map<string, AnyHandler[]>();
 	const commands = new Map<string, AnyHandler>();
 	const shortcuts = new Map<string, AnyHandler>();
+	const tools = new Map<string, Record<string, unknown>>();
 
 	const pi: MockPi = {
 		on: vi.fn((event: string, handler: AnyHandler) => {
@@ -141,6 +144,9 @@ function makePi(): { pi: MockPi; handlers: Map<string, AnyHandler[]>; commands: 
 			shortcuts.set(key, def.handler);
 		}),
 		registerFlag: vi.fn(),
+		registerTool: vi.fn((def: { name: string }) => {
+			tools.set(def.name, def as Record<string, unknown>);
+		}),
 		getActiveTools: vi.fn(() => ["read", "bash", "edit", "write", "grep", "find", "ls"]),
 		setActiveTools: vi.fn(),
 		appendEntry: vi.fn(),
@@ -149,7 +155,7 @@ function makePi(): { pi: MockPi; handlers: Map<string, AnyHandler[]>; commands: 
 		sendMessage: vi.fn(),
 	};
 
-	return { pi, handlers, commands, shortcuts };
+	return { pi, handlers, commands, shortcuts, tools };
 }
 
 /** Build a minimal ctx.ui.theme that supports fg/dim/bold/strikethrough/border. */
@@ -181,6 +187,7 @@ let pi: MockPi;
 let handlers: Map<string, AnyHandler[]>;
 let commands: Map<string, AnyHandler>;
 let shortcuts: Map<string, AnyHandler>;
+let tools: Map<string, Record<string, unknown>>;
 let ctx: MockContext;
 
 beforeEach(() => {
@@ -189,6 +196,7 @@ beforeEach(() => {
 	handlers = env.handlers;
 	commands = env.commands;
 	shortcuts = env.shortcuts;
+	tools = env.tools;
 	ctx = makeContext();
 	patchTheme(ctx);
 	factory(pi as unknown as Parameters<typeof factory>[0]);
@@ -219,6 +227,11 @@ describe("registration", () => {
 		expect(commands.has("mode")).toBe(true);
 		expect(commands.has("auto-depth")).toBe(true);
 		expect(commands.has("done")).toBe(true);
+	});
+
+	it("registers a todo tool", () => {
+		expect(pi.registerTool).toHaveBeenCalledWith(expect.objectContaining({ name: "todo" }));
+		expect(tools.has("todo")).toBe(true);
 	});
 
 	it("subscribes to tool_call, context, before_agent_start, turn_end, agent_end, session_start, session_tree, turn_start, before_provider_request, message_update", () => {
@@ -779,6 +792,34 @@ describe("plan flow", () => {
 		);
 		expect(execCall).toBeDefined();
 		expect(execCall![1]).toMatchObject({ triggerTurn: true, deliverAs: "followUp" });
+		expect(execCall![0]).toMatchObject({ customType: "modes-execute" });
+		expect((execCall![0] as { content: string }).content).not.toContain("todo tool");
+	});
+
+	it("Execute path for 3+ steps tells the agent to use todo", async () => {
+		ctx.ui.select.mockResolvedValueOnce("Execute the plan");
+		const planText = `Plan:
+1. Inspect the codebase
+2. Update the settings
+3. Add the test coverage`;
+		await emit(
+			handlers,
+			"agent_end",
+			{
+				messages: [
+					{
+						role: "assistant",
+						content: [{ type: "text", text: planText }],
+					},
+				],
+			},
+			ctx,
+		);
+		const execCall = pi.sendMessage.mock.calls.find(
+			(c: unknown[]) => (c[0] as { customType?: string }).customType === "modes-execute",
+		);
+		expect(execCall).toBeDefined();
+		expect((execCall![0] as { content: string }).content).toContain("todo");
 	});
 
 	it("Refine path opens editor and posts refinement", async () => {
